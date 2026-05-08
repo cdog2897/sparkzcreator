@@ -46,6 +46,8 @@ LEADING_FRAME_SKIP_SECONDS = 0.25
 TRAILING_FRAME_SKIP_SECONDS = 0.25
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".mov", ".mp4"}
+SDR_COLOR_PARAMS = "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+STRIP_AMBIENT_SIDE_DATA = "sidedata=mode=delete:type=AMBIENT_VIEWING_ENVIRONMENT"
 
 
 @dataclass(frozen=True)
@@ -233,14 +235,26 @@ def make_segment(
     )
     video_filter = (
         f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={WIDTH}:{HEIGHT},setsar=1,fps={FPS},format=yuv420p"
+        f"crop={WIDTH}:{HEIGHT},setsar=1,fps={FPS},{SDR_COLOR_PARAMS},"
+        f"{STRIP_AMBIENT_SIDE_DATA},format=yuv420p"
     )
 
     command = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error"]
     command.extend(["-i", str(source.path)])
     if start > 0:
         command.extend(["-ss", f"{start:.3f}"])
-    command.extend(["-t", f"{duration:.3f}", "-map", "0:v:0"])
+    command.extend(
+        [
+            "-t",
+            f"{duration:.3f}",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-map",
+            "0:v:0",
+        ]
+    )
 
     command.append("-an")
 
@@ -258,6 +272,12 @@ def make_segment(
             "20",
             "-pix_fmt",
             "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
             "-avoid_negative_ts",
             "make_zero",
             "-reset_timestamps",
@@ -311,7 +331,10 @@ def overlay_text(
         "x=(w-text_w)/2:"
         "y=(h-text_h)/2"
     )
-    video_filter = f"trim=start_frame={DROP_INITIAL_FRAMES},setpts=PTS-STARTPTS,{drawtext}"
+    video_filter = (
+        f"trim=start_frame={DROP_INITIAL_FRAMES},setpts=PTS-STARTPTS,"
+        f"fps={FPS},{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},format=yuv420p,{drawtext}"
+    )
     run_ffmpeg(
         [
             ffmpeg_exe(),
@@ -327,6 +350,10 @@ def overlay_text(
             str(music_path),
             "-t",
             f"{output_duration:.3f}",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
             "-map",
             "0:v:0",
             "-map",
@@ -341,14 +368,24 @@ def overlay_text(
             "20",
             "-pix_fmt",
             "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
             "-c:a",
             "aac",
             "-b:a",
             "192k",
             "-ar",
-            "48000",
+            "44100",
             "-ac",
             "2",
+            "-metadata:s:v:0",
+            "handler_name=VideoHandler",
+            "-metadata:s:a:0",
+            "handler_name=SoundHandler",
             "-shortest",
             "-movflags",
             "+faststart",
