@@ -3,3 +3,13 @@ outputs/*.jpg
 tmp*
 .pycache/
 .DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+frontend/node_modules/
+frontend/dist/
+Sparkz Creator.app/
+music/*
+!music/.gitkeep
+videos/*
+!videos/.gitkeep
