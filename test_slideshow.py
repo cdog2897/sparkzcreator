@@ -12,8 +12,12 @@ from generate_video import OUTPUT_DIR, probe_duration
 from slideshow import (
     DEFAULT_IMAGE_SECONDS,
     REFERENCE_FONT_SIZE,
+    REFERENCE_FRAME_HEIGHT,
+    REFERENCE_FRAME_WIDTH,
     REFERENCE_LINE_SPACING,
     SLIDESHOW_FPS,
+    SLIDESHOW_HEIGHT,
+    SLIDESHOW_WIDTH,
     TEXT_COLOR_HEX,
     cover_crop_filter,
     fitted_text_metrics,
@@ -23,6 +27,7 @@ from slideshow import (
     slideshow_duration_seconds,
     slideshow_plan,
     slideshow_text_metrics,
+    text_draw_position,
     validate_image_seconds,
 )
 from web_app import app
@@ -84,19 +89,30 @@ class SlideshowTimingTests(unittest.TestCase):
             (REFERENCE_FONT_SIZE, REFERENCE_LINE_SPACING),
         )
         self.assertEqual(slideshow_text_metrics(960), (35, -2))
-        self.assertEqual(slideshow_text_metrics(1080), (39, -2))
+        self.assertEqual(slideshow_text_metrics(1920), (70, -4))
         self.assertEqual(fitted_text_metrics(SAMPLE_TEXT, 960), (35, -2))
-        self.assertEqual(fitted_text_metrics(SAMPLE_TEXT, 1080), (39, -2))
+        self.assertEqual(fitted_text_metrics(SAMPLE_TEXT, 1920), (70, -4))
+        # Width share stays constant: 70/1920 == 35/960.
+        self.assertEqual(
+            slideshow_text_metrics(SLIDESHOW_WIDTH)[0] / SLIDESHOW_WIDTH,
+            REFERENCE_FONT_SIZE / REFERENCE_FRAME_WIDTH,
+        )
+
+    def test_caption_stays_centered_like_the_reference(self) -> None:
+        self.assertEqual(REFERENCE_FRAME_WIDTH, 960)
+        self.assertEqual(REFERENCE_FRAME_HEIGHT, 576)
+        self.assertEqual(text_draw_position(), ("(w-text_w)/2", "(h-text_h)/2"))
 
     def test_long_lines_shrink_instead_of_leaving_the_frame(self) -> None:
-        font_size, _line_spacing = fitted_text_metrics("w" * 80, 1080)
-        self.assertLess(font_size, 39)
+        font_size, _line_spacing = fitted_text_metrics("w" * 80, 1920)
+        self.assertLess(font_size, 70)
 
     def test_cover_crop_is_full_bleed_and_still(self) -> None:
-        video_filter = cover_crop_filter(1080, 1920)
+        video_filter = cover_crop_filter(SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT)
         self.assertIn("force_original_aspect_ratio=increase", video_filter)
-        self.assertIn("crop=1080:1920:(iw-1080)/2:(ih-1920)/2", video_filter)
+        self.assertIn("crop=1920:1080:(iw-1920)/2:(ih-1080)/2", video_filter)
         self.assertNotIn("zoompan", video_filter)
+        self.assertNotIn("pad=", video_filter)
 
     def test_text_color_is_the_tiktok_yellow_swatch(self) -> None:
         self.assertEqual(TEXT_COLOR_HEX, "#F2CD46")
@@ -124,6 +140,85 @@ class SlideshowRenderTests(unittest.TestCase):
 
             self.assertAlmostEqual(probe_duration(output_path), 20 / 24, places=2)
             self.assertEqual(_video_packet_count(output_path), 20)
+
+    def test_default_canvas_is_16_by_9(self) -> None:
+        self.assertEqual((SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT), (1920, 1080))
+        self.assertEqual(SLIDESHOW_WIDTH / SLIDESHOW_HEIGHT, 16 / 9)
+
+    def test_cover_crop_fills_the_frame_with_no_bars(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            portrait = temp_dir / "portrait.png"
+            landscape = temp_dir / "landscape.png"
+            Image.new("RGB", (40, 220), (220, 30, 40)).save(portrait)
+            Image.new("RGB", (420, 50), (30, 70, 210)).save(landscape)
+            output_path = temp_dir / "filled.mp4"
+            render_slideshow(
+                [portrait, landscape],
+                text=SAMPLE_TEXT,
+                image_seconds=0.417,
+                music_path=None,
+                width=320,
+                height=180,
+                output_path=output_path,
+            )
+            first = _frame_at(output_path, 0)
+            second = _frame_at(output_path, 0.5)
+            self.assertEqual(first.size, (320, 180))
+            self.assertEqual(second.size, (320, 180))
+            self.assertTrue(_is_red(first.getpixel((4, 4))))
+            self.assertTrue(_is_red(first.getpixel((316, 176))))
+            self.assertTrue(_is_blue(second.getpixel((4, 4))))
+            self.assertTrue(_is_blue(second.getpixel((316, 176))))
+            self.assertTrue(_has_yellow(first))
+            self.assertTrue(_has_yellow(second))
+
+
+def _frame_at(path: Path, seconds: float) -> Image.Image:
+    import subprocess
+
+    from generate_video import ffmpeg_exe
+
+    with tempfile.NamedTemporaryFile(suffix=".png") as handle:
+        subprocess.run(
+            [
+                ffmpeg_exe(),
+                "-y",
+                "-ss",
+                str(seconds),
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+                handle.name,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        with Image.open(handle.name) as frame:
+            return frame.convert("RGB")
+
+
+def _is_red(pixel: tuple[int, int, int]) -> bool:
+    red, green, blue = pixel
+    return red > 160 and green < 80 and blue < 90
+
+
+def _is_blue(pixel: tuple[int, int, int]) -> bool:
+    red, green, blue = pixel
+    return blue > 140 and red < 80 and green < 120
+
+
+def _has_yellow(frame: Image.Image) -> bool:
+    width, height = frame.size
+    for y in range(height // 2 - 24, height // 2 + 24):
+        for x in range(width // 2 - 40, width // 2 + 40):
+            red, green, blue = frame.getpixel((x, y))
+            if red > 180 and 140 < green < 230 and blue < 120 and red > green > blue:
+                return True
+    return False
 
 
 def _video_packet_count(path: Path) -> int:
@@ -160,8 +255,8 @@ class SlideshowEndpointTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["defaultImageDuration"], 0.417)
         self.assertEqual(payload["fps"], 24)
-        self.assertEqual(payload["width"], 1080)
-        self.assertEqual(payload["height"], 1920)
+        self.assertEqual(payload["width"], 1920)
+        self.assertEqual(payload["height"], 1080)
         self.assertEqual(payload["textColor"], "#F2CD46")
         self.assertEqual(payload["fontSizeAtReference"], 35)
         self.assertEqual(payload["referenceWidth"], 960)

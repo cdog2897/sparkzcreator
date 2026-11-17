@@ -2,7 +2,9 @@
 """Fast-cut photo slideshows with a static text overlay.
 
 Timing and text layout are measured from the reference TikTok screen
-recording (960x576, 24fps). The photos are stills: hard cuts, no zoom.
+recording (960x576, 24fps). The default canvas is 1920x1080, the same
+16:9 frame at twice the reference size. Photos cover that frame and are
+center-cropped. The photos are stills: hard cuts, no zoom.
 Each photo holds for 10 frames at 24fps, which is 0.417 seconds. Twenty
 photos end at 8.333 seconds, the hard cut into the TikTok end card.
 The yellow is TikTok's in-app yellow swatch, #F2CD46.
@@ -37,11 +39,16 @@ MAX_IMAGES = 80
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_TEXT_CHARS = 800
 
-SLIDESHOW_WIDTH = 1080
-SLIDESHOW_HEIGHT = 1920
+# 16:9, twice the 960x576 reference on both axes.
+SLIDESHOW_WIDTH = 1920
+SLIDESHOW_HEIGHT = 1080
 
-# Glyph fit against the 960px-wide reference frame, using ffmpeg drawtext.
+# Glyph fit against the 960x576 reference frame, using ffmpeg drawtext.
+# Size scales with frame width, so the caption keeps the same share of the
+# width. The reference ink is centered (measured center at half the height),
+# and the block stays centered on a 16:9 frame.
 REFERENCE_FRAME_WIDTH = 960
+REFERENCE_FRAME_HEIGHT = 576
 REFERENCE_FONT_SIZE = 35
 REFERENCE_LINE_SPACING = -2
 # Distance between the tops of the two reference lines at that font size.
@@ -150,12 +157,17 @@ def fitted_text_metrics(text: str, width: int) -> tuple[int, int]:
 
 
 def cover_crop_filter(width: int, height: int) -> str:
-    """Scale to cover, then center-crop. No zoom and no pan."""
+    """Scale to cover, then center-crop. No bars, no zoom, and no pan."""
     return (
         f"scale={width}:{height}:force_original_aspect_ratio=increase,"
         f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2,"
         "setsar=1"
     )
+
+
+def text_draw_position() -> tuple[str, str]:
+    """Horizontal and vertical center, the reference caption's place."""
+    return "(w-text_w)/2", "(h-text_h)/2"
 
 
 def filter_path(path: Path) -> str:
@@ -308,6 +320,7 @@ def render_slideshow(
             music_index = len(normalized)
             command.extend(["-i", str(music_path)])
 
+        text_x, text_y = text_draw_position()
         filters: list[str] = []
         for index in range(len(normalized)):
             filters.append(
@@ -328,8 +341,8 @@ def render_slideshow(
                 f"line_spacing={line_spacing}:"
                 f"fontcolor={TEXT_COLOR}:"
                 "text_align=C:"
-                "x=(w-text_w)/2:"
-                "y=(h-text_h)/2[with_text]"
+                f"x={text_x}:"
+                f"y={text_y}[with_text]"
             )
             current = "with_text"
         else:

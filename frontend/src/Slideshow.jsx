@@ -297,7 +297,7 @@ export default function Slideshow({ onHome }) {
         <div className="topbar-metrics" aria-label="slideshow timing">
           <span>{images.length} photos</span>
           <span>{formatSeconds(totalSeconds)}</span>
-          <span>{settings ? `${settings.width}×${settings.height}` : '1080×1920'}</span>
+          <span>{settings ? `${settings.width}×${settings.height}` : '1920×1080'}</span>
         </div>
       </header>
 
@@ -510,7 +510,15 @@ export default function Slideshow({ onHome }) {
         </section>
 
         <section className="slideshow-stage" aria-label="slideshow preview">
-          <div className="slideshow-phone" ref={phoneRef}>
+          <div
+            className="slideshow-phone"
+            ref={phoneRef}
+            style={{
+              aspectRatio: settings
+                ? `${settings.width} / ${settings.height}`
+                : '16 / 9',
+            }}
+          >
             {showRender && job?.outputUrl ? (
               <video
                 controls
