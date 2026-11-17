@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   Check,
   Download,
   ChevronRight,
@@ -515,7 +516,7 @@ function previewCtaLayout(videoFormat, frameSize) {
   };
 }
 
-function App() {
+function App({ onHome }) {
   const [bootstrap, setBootstrap] = useState(null);
   const [formats, setFormats] = useState([]);
   const [mediaPool, setMediaPool] = useState(null);
@@ -1651,6 +1652,16 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">
+          {onHome ? (
+            <button
+              className="back-home-button"
+              onClick={onHome}
+              type="button"
+            >
+              <ArrowLeft size={16} />
+              Home
+            </button>
+          ) : null}
           <Film size={24} strokeWidth={2.2} />
           <h1>Short Form Video Creator</h1>
         </div>
