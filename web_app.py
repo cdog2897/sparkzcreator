@@ -18,10 +18,17 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from text_slideshow import (
+    MAX_SLIDES as TEXT_SLIDE_MAX_SLIDES,
+    export_text_slideshow,
+    open_slide_image,
+    slide_png_bytes,
+    style_payload as text_slideshow_style_payload,
+)
 from slideshow import (
     DEFAULT_IMAGE_SECONDS,
     FONT_PATH as SLIDESHOW_FONT_PATH,
@@ -123,6 +130,17 @@ class MusicDeleteRequest(BaseModel):
     music_name: str = Field(min_length=1)
 
 
+class TextSlideRequest(BaseModel):
+    background_asset_id: Optional[str] = None
+    background_color: str = "#d5e4f5"
+    background_color_2: Optional[str] = "#f7e7ef"
+    elements: list[dict] = Field(default_factory=list)
+
+
+class TextSlideshowExportRequest(BaseModel):
+    slides: list[TextSlideRequest]
+
+
 @dataclass
 class RenderJob:
     id: str
@@ -136,6 +154,9 @@ class RenderJob:
 
 jobs: dict[str, RenderJob] = {}
 jobs_lock = threading.Lock()
+
+TEXT_SLIDE_ASSET_DIR = ROOT / "tmp_textslide_assets"
+_ASSET_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 def validate_child_path(root: Path, child: Path) -> Path:
@@ -920,6 +941,99 @@ async def start_slideshow_render(
         "job": job_payload(jobs[job_id]),
         "plan": slideshow_plan(len(payloads), checked_duration),
     }
+
+
+def text_slide_asset_ids(slides: list[dict]) -> list[str]:
+    found: list[str] = []
+    for slide in slides:
+        background_id = slide.get("background_asset_id")
+        if background_id:
+            found.append(str(background_id))
+        for element in slide.get("elements") or []:
+            if element.get("type") == "image" and element.get("asset_id"):
+                found.append(str(element["asset_id"]))
+    return found
+
+
+def load_text_slide_assets(slides: list[dict]) -> dict[str, Path]:
+    assets: dict[str, Path] = {}
+    for asset_id in text_slide_asset_ids(slides):
+        if asset_id in assets:
+            continue
+        if not _ASSET_ID.match(asset_id):
+            raise ValueError("Unknown image.")
+        path = TEXT_SLIDE_ASSET_DIR / f"{asset_id}.png"
+        if not path.is_file():
+            raise ValueError("Unknown image.")
+        assets[asset_id] = path
+    return assets
+
+
+@app.get("/api/text-slideshow")
+def text_slideshow_defaults() -> dict[str, object]:
+    return text_slideshow_style_payload()
+
+
+@app.post("/api/text-slideshow/assets")
+async def upload_text_slide_asset(file: UploadFile = File(...)) -> dict[str, object]:
+    content = await file.read()
+    try:
+        image = open_slide_image(content)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    asset_id = uuid4().hex
+    TEXT_SLIDE_ASSET_DIR.mkdir(exist_ok=True)
+    path = TEXT_SLIDE_ASSET_DIR / f"{asset_id}.png"
+    image.save(path, format="PNG")
+    return {
+        "id": asset_id,
+        "width": image.width,
+        "height": image.height,
+        "url": f"/api/text-slideshow/assets/{asset_id}",
+    }
+
+
+@app.get("/api/text-slideshow/assets/{asset_id}")
+def text_slide_asset(asset_id: str) -> FileResponse:
+    if not _ASSET_ID.match(asset_id):
+        raise HTTPException(status_code=404, detail="Unknown image.")
+    path = TEXT_SLIDE_ASSET_DIR / f"{asset_id}.png"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Unknown image.")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.post("/api/text-slideshow/preview")
+def preview_text_slide(slide: TextSlideRequest) -> Response:
+    payload = slide.model_dump()
+    try:
+        png = slide_png_bytes(payload, load_text_slide_assets([payload]))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return Response(content=png, media_type="image/png")
+
+
+@app.post("/api/text-slideshow/export")
+def export_text_slides(request: TextSlideshowExportRequest) -> FileResponse:
+    if not request.slides:
+        raise HTTPException(status_code=400, detail="Add at least one slide.")
+    if len(request.slides) > TEXT_SLIDE_MAX_SLIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Use {TEXT_SLIDE_MAX_SLIDES} slides or fewer.",
+        )
+    slides = [slide.model_dump() for slide in request.slides]
+    try:
+        assets = load_text_slide_assets(slides)
+        folder, zip_path = export_text_slideshow(slides, assets)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=zip_path.name,
+        headers={"X-Output-Folder": folder.name},
+    )
 
 
 @app.post("/api/render")

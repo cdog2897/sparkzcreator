@@ -124,4 +124,16 @@ Drop in photos (or choose several at once), drag or use the arrows to reorder th
 
 The text is centered horizontally and sits at the same vertical center as the 960×576 reference. It is drawn in TikTok Sans SemiBold at TikTok's yellow swatch `#F2CD46`, with no outline or shadow, and the size scales with the frame width so it covers the same share of the picture. TikTok's in-app Classic style is Proxima Nova Semibold, which is commercial and not bundled. TikTok Sans is the SIL Open Font License face in `fonts/TikTokSans/`.
 
+### Text Slideshow
+
+Open Home → Text Slideshow, or go to `http://127.0.0.1:5173/tools/text-slideshow`.
+
+This one exports still PNGs, 1080×1920, for a TikTok photo carousel. There is no music and no video. Each slide has a background photo (cover-cropped, no dimming) or a two-color gradient, any number of text boxes, and any number of image overlays.
+
+Text is TikTok Sans. The weight menu lists the files in `fonts/TikTokSans/` (Regular, Medium, SemiBold, Bold). **Add title** drops a box in the reference heading style: SemiBold, 53px, `#000000`, centered, 820px wide, starting at the measured vertical position. **Add body text** uses Medium at 43px with a line pitch of 51px, so a blank line in the text is the paragraph gap from the reference. **Add label** turns on the black rounded highlight (12px corners, white text, Medium 41px) used for the “se llama …” tag. Drag a box to move it. Drag the side handles to change the wrap width. Image overlays keep their aspect ratio unless you unlock it, and they default to a 16px corner radius like the reference screenshot. Bring forward and send back change the layer order.
+
+The on-screen preview is a PNG from the same Pillow renderer as the export, so what you see is what downloads. Export writes `01.png`, `02.png`, … into `outputs/<timestamp>_textslides/` and downloads a zip of those files.
+
+The demo deck is English placeholder copy in that measured layout, so you can try it before uploading photos.
+
 Music is optional. Leave the picker on Random to use a track from `music/` (trimmed to the video), choose No music, or upload a track. Put files in `music/` yourself if you already have them. Render, preview the MP4, and download it from `outputs/`. The default canvas is 1920×1080 at 24fps. Every photo is scaled to cover that frame and center-cropped, so portrait and landscape sources fill the picture with no black bars.

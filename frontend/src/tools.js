@@ -1,6 +1,7 @@
-import { Clapperboard, Images } from 'lucide-react';
+import { Clapperboard, Images, Type } from 'lucide-react';
 import TimelineEditor from './App.jsx';
 import Slideshow from './Slideshow.jsx';
+import TextSlideshow from './TextSlideshow.jsx';
 
 // Home reads this list. To add a tool, append an entry:
 // { id, name, description, icon, route, component }.
@@ -22,5 +23,13 @@ export const tools = [
     icon: Images,
     route: '/tools/slideshow',
     component: Slideshow,
+  },
+  {
+    id: 'text-slideshow',
+    name: 'Text Slideshow',
+    description: 'Lay out text and pictures on 1080×1920 slides, then export PNGs for a TikTok photo carousel.',
+    icon: Type,
+    route: '/tools/text-slideshow',
+    component: TextSlideshow,
   },
 ];
