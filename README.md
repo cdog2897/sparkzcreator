@@ -95,6 +95,33 @@ cd frontend
 npm run dev
 ```
 
-Open the Vite URL, usually `http://127.0.0.1:5173`. The app opens on a Home screen. Timeline Video Editor is the current tool: choose a format, pick a clip folder, select clips in order, enter text, choose music, render the video, and download outputs from `outputs/`. A direct link such as `http://127.0.0.1:5173/tools/timeline` opens that editor, including after a refresh.
+Open the Vite URL, usually `http://127.0.0.1:5173`. The app opens on a Home screen. Home lists every tool in `frontend/src/tools.js`. A direct link such as `http://127.0.0.1:5173/tools/timeline` opens that tool, including after a refresh.
+
+On a Mac, double-click `Run App.command` in the project folder. It creates a virtualenv if needed, installs Python and frontend dependencies, and opens the app. Keep that window open while you use it, and press Control-C there to stop it. You can also start the two processes yourself:
+
+```bash
+python3 -m pip install -r requirements.txt
+cd frontend && npm install
+# terminal 1, from the project folder
+python3 -m uvicorn web_app:app --host 127.0.0.1 --port 8000
+# terminal 2
+cd frontend && npm run dev
+```
+
+ffmpeg is installed with the Python dependencies through `imageio-ffmpeg`, so a separate ffmpeg install is not required.
 
 To add another tool, append it to `frontend/src/tools.js` with a name, description, icon, route, and component. Home and the router both read that list. The component receives `{ onHome }` so it can return to Home.
+
+### Timeline Video Editor
+
+Choose a format, pick a clip folder, select clips in order, enter text, choose music, render the video, and download outputs from `outputs/`.
+
+### Fast Cut Slideshow
+
+Open Home → Fast Cut Slideshow, or go to `http://127.0.0.1:5173/tools/slideshow`.
+
+Drop in photos (or choose several at once), drag or use the arrows to reorder them, and shuffle if you want. Type the overlay text, with a line break between lines. Each photo holds for 0.417 seconds by default — 10 frames at 24fps, a hard cut, full-bleed and center-cropped, with no zoom. Change the seconds-per-photo value to hold them longer or shorter; the renderer snaps that value to a whole frame. The video length is the photo count times that hold, even when there are more photos than the music.
+
+The text is centered horizontally and sits at the same vertical center as the 960×576 reference. It is drawn in TikTok Sans SemiBold at TikTok's yellow swatch `#F2CD46`, with no outline or shadow, and the size scales with the frame width so it covers the same share of the picture. TikTok's in-app Classic style is Proxima Nova Semibold, which is commercial and not bundled. TikTok Sans is the SIL Open Font License face in `fonts/TikTokSans/`.
+
+Music is optional. Leave the picker on Random to use a track from `music/` (trimmed to the video), choose No music, or upload a track. Put files in `music/` yourself if you already have them. Render, preview the MP4, and download it from `outputs/`. The default canvas is 1920×1080 at 24fps. Every photo is scaled to cover that frame and center-cropped, so portrait and landscape sources fill the picture with no black bars.

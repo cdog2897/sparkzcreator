@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import random
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -14,12 +16,32 @@ from typing import Literal, Optional
 from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from slideshow import (
+    DEFAULT_IMAGE_SECONDS,
+    FONT_PATH as SLIDESHOW_FONT_PATH,
+    MAX_IMAGE_SECONDS,
+    MAX_IMAGES,
+    MAX_TEXT_CHARS,
+    MIN_IMAGE_SECONDS,
+    REFERENCE_FONT_SIZE,
+    REFERENCE_FRAME_WIDTH,
+    REFERENCE_LINE_SPACING,
+    REFERENCE_LINE_TOP_DELTA,
+    SLIDESHOW_FPS,
+    SLIDESHOW_HEIGHT,
+    SLIDESHOW_WIDTH,
+    TEXT_COLOR_HEX,
+    render_slideshow,
+    slideshow_plan,
+    validate_image_payloads,
+    validate_image_seconds,
+)
 from generate_video import (
     COVER_IMAGE_FORMAT,
     CTA_TEXT,
@@ -786,6 +808,120 @@ def outputs() -> dict[str, object]:
     return {"outputs": list_outputs()}
 
 
+def slideshow_music_path(music_name: str) -> Path | None:
+    cleaned = music_name.strip()
+    if cleaned.lower() in {"", "random"}:
+        try:
+            tracks = list_music_tracks()
+        except FileNotFoundError:
+            return None
+        return random.choice(tracks)
+    if cleaned.lower() == "none":
+        return None
+    return music_for_request(cleaned)
+
+
+def run_slideshow_job(
+    job_id: str,
+    image_payloads: list[bytes],
+    text: str,
+    image_seconds: float,
+    music_path: Path | None,
+) -> None:
+    set_job_status(job_id, "running")
+    temp_dir = Path(tempfile.mkdtemp(dir=ROOT))
+    try:
+        append_job_log(job_id, "Preparing photos.")
+        image_paths: list[Path] = []
+        for index, content in enumerate(image_payloads, start=1):
+            path = temp_dir / f"upload_{index:03d}.img"
+            path.write_bytes(content)
+            image_paths.append(path)
+        output_path = render_slideshow(
+            image_paths,
+            text=text,
+            image_seconds=image_seconds,
+            music_path=music_path,
+            progress_callback=lambda message: append_job_log(job_id, message),
+        )
+        output_url = f"/api/media/output?{urlencode({'output_name': output_path.name})}"
+        append_job_log(job_id, f"Done: {output_path.name}")
+        set_job_status(
+            job_id,
+            "complete",
+            output_name=output_path.name,
+            output_url=output_url,
+            error=None,
+        )
+    except Exception as error:  # noqa: BLE001 - surface slideshow failures to the UI.
+        append_job_log(job_id, f"Error: {error}")
+        set_job_status(job_id, "error", error=str(error))
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.get("/api/slideshow")
+def slideshow_defaults() -> dict[str, object]:
+    return {
+        "fps": SLIDESHOW_FPS,
+        "defaultImageDuration": DEFAULT_IMAGE_SECONDS,
+        "minImageDuration": MIN_IMAGE_SECONDS,
+        "maxImageDuration": MAX_IMAGE_SECONDS,
+        "maxImages": MAX_IMAGES,
+        "width": SLIDESHOW_WIDTH,
+        "height": SLIDESHOW_HEIGHT,
+        "textColor": TEXT_COLOR_HEX,
+        "referenceWidth": REFERENCE_FRAME_WIDTH,
+        "fontSizeAtReference": REFERENCE_FONT_SIZE,
+        "lineSpacingAtReference": REFERENCE_LINE_SPACING,
+        "lineTopDeltaAtReference": REFERENCE_LINE_TOP_DELTA,
+    }
+
+
+@app.post("/api/slideshow/render")
+async def start_slideshow_render(
+    images: list[UploadFile] = File(...),
+    text: str = Form(""),
+    image_duration: float = Form(DEFAULT_IMAGE_SECONDS),
+    music_name: str = Form("random"),
+) -> dict[str, object]:
+    if not images:
+        raise HTTPException(status_code=400, detail="Add at least one image.")
+    if len(images) > MAX_IMAGES:
+        raise HTTPException(status_code=400, detail=f"Use {MAX_IMAGES} images or fewer.")
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text must be {MAX_TEXT_CHARS} characters or fewer.",
+        )
+    try:
+        checked_duration = validate_image_seconds(image_duration)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    music_path = slideshow_music_path(music_name)
+    payloads = [await upload.read() for upload in images]
+    try:
+        validate_image_payloads(payloads)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    job_id = uuid4().hex
+    with jobs_lock:
+        jobs[job_id] = RenderJob(id=job_id)
+
+    thread = threading.Thread(
+        target=run_slideshow_job,
+        args=(job_id, payloads, text, checked_duration, music_path),
+        daemon=True,
+    )
+    thread.start()
+    return {
+        "job": job_payload(jobs[job_id]),
+        "plan": slideshow_plan(len(payloads), checked_duration),
+    }
+
+
 @app.post("/api/render")
 def start_render(request: RenderRequest) -> dict[str, object]:
     job_id = uuid4().hex
@@ -836,6 +972,13 @@ def clip_media(
 @app.get("/api/media/music")
 def music_media(music_name: str = Query(..., min_length=1)) -> FileResponse:
     return FileResponse(music_for_request(music_name))
+
+
+@app.get("/api/media/slideshow-font")
+def slideshow_font_media() -> FileResponse:
+    if not SLIDESHOW_FONT_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Missing slideshow font.")
+    return FileResponse(SLIDESHOW_FONT_PATH, media_type="font/ttf")
 
 
 @app.get("/api/media/appstore")

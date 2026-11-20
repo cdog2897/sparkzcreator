@@ -1,5 +1,7 @@
 imageio-ffmpeg>=0.6.0
 pillow>=11.3.0
 fastapi>=0.115.0
+python-multipart>=0.0.12
+httpx2>=0.1.0
 uvicorn[standard]>=0.30.0
 yt-dlp[default]>=2026.6.9
