@@ -95,4 +95,6 @@ cd frontend
 npm run dev
 ```
 
-Open the Vite URL, usually `http://127.0.0.1:5173`. The UI lets you choose a format, pick a clip folder, select clips in order, enter text, choose music, render the video, and download outputs from `outputs/`.
+Open the Vite URL, usually `http://127.0.0.1:5173`. The app opens on a Home screen. Timeline Video Editor is the current tool: choose a format, pick a clip folder, select clips in order, enter text, choose music, render the video, and download outputs from `outputs/`. A direct link such as `http://127.0.0.1:5173/tools/timeline` opens that editor, including after a refresh.
+
+To add another tool, append it to `frontend/src/tools.js` with a name, description, icon, route, and component. Home and the router both read that list. The component receives `{ onHome }` so it can return to Home.
