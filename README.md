@@ -97,7 +97,23 @@ npm run dev
 
 Open the Vite URL, usually `http://127.0.0.1:5173`. The app opens on a Home screen. Home lists every tool in `frontend/src/tools.js`. A direct link such as `http://127.0.0.1:5173/tools/timeline` opens that tool, including after a refresh.
 
-On a Mac, double-click `Run App.command` in the project folder. It creates a virtualenv if needed, installs Python and frontend dependencies, and opens the app. Keep that window open while you use it, and press Control-C there to stop it. You can also start the two processes yourself:
+On a Mac, double-click `Sparkz Creator.app` or `Run App.command` in the project folder. The command creates a virtualenv if needed, installs Python and frontend dependencies, and opens the app. Keep that window open while you use it, and press Control-C there to stop it.
+
+Startup writes a line for each step, including the Python dependency check, which can sit for a while on a cold start before anything listens. `Sparkz Creator.app` keeps waiting while that log is still growing (up to 10 minutes) and only reports failure if the log goes quiet for a minute or the launcher exits. The log is `~/Library/Logs/Sparkz Creator.log`. Opening the app again while those servers are already up opens the existing app instead of stopping on a port conflict. A previous Sparkz Creator that is still holding the ports but not responding is stopped and started again. Another program on port 8000 or 5173 is left alone and named in the log.
+
+The app bundle is built from `macos/SparkzCreatorLauncher.swift`. Rebuild it after a launcher change:
+
+```bash
+mkdir -p "Sparkz Creator.app/Contents/MacOS" "Sparkz Creator.app/Contents/Resources"
+cp macos/Info.plist "Sparkz Creator.app/Contents/Info.plist"
+cp macos/SparkzCreator.icns "Sparkz Creator.app/Contents/Resources/SparkzCreator.icns"
+swiftc -O -framework AppKit \
+  -o "Sparkz Creator.app/Contents/MacOS/SparkzCreatorLauncher" \
+  macos/SparkzCreatorLauncher.swift
+chmod +x "Run App.command"
+```
+
+You can also start the two processes yourself:
 
 ```bash
 python3 -m pip install -r requirements.txt

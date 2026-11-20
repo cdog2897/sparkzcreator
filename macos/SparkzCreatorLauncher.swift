@@ -4,10 +4,21 @@ import Foundation
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let appURL = URL(string: "http://127.0.0.1:5173")!
+    private let pollInterval: TimeInterval = 0.5
+    /// Give up only after the launcher log has been silent this long.
+    private let stallLimit: TimeInterval = 60
+    /// Cold installs can keep logging for several minutes. Keep waiting while they do.
+    private let maxStartup: TimeInterval = 10 * 60
     private var launcher: Process?
     private var logHandle: FileHandle?
+    private var logURL: URL?
     private var isReady = false
     private var isQuitting = false
+    private var didResolve = false
+    private var ownsServers = true
+    private var startupStarted = Date()
+    private var lastProgress = Date()
+    private var lastLogSize: UInt64 = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -30,7 +41,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let logsDirectory = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Logs", isDirectory: true)
             let logURL = logsDirectory.appendingPathComponent("Sparkz Creator.log")
+            try FileManager.default.createDirectory(
+                at: logsDirectory,
+                withIntermediateDirectories: true
+            )
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
+            self.logURL = logURL
 
             let handle = try FileHandle(forWritingTo: logURL)
             try handle.truncate(atOffset: 0)
@@ -40,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let existingPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
             environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + existingPath
             environment["RUN_APP_NO_BROWSER"] = "1"
+            environment["PYTHONUNBUFFERED"] = "1"
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -56,8 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             launcher = process
+            startupStarted = Date()
+            lastProgress = Date()
             try process.run()
-            pollForReadiness(attempt: 1)
+            pollForReadiness()
         } catch {
             showError(
                 title: "Sparkz Creator could not start",
@@ -66,47 +85,124 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func pollForReadiness(attempt: Int) {
-        guard let launcher, launcher.isRunning, !isQuitting else { return }
+    private func pollForReadiness() {
+        guard !isQuitting, !didResolve else { return }
+        if ownsServers, let launcher, !launcher.isRunning {
+            return
+        }
+        noteLogProgress()
 
         var request = URLRequest(url: appURL)
-        request.timeoutInterval = 1
+        request.timeoutInterval = 2
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
-            guard let self else { return }
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-
             DispatchQueue.main.async {
-                guard !self.isQuitting else { return }
-
+                guard let self, !self.isQuitting, !self.didResolve else { return }
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if (200..<400).contains(statusCode) {
-                    self.isReady = true
-                    NSWorkspace.shared.open(self.appURL)
-                } else if attempt < 80, self.launcher?.isRunning == true {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                        self.pollForReadiness(attempt: attempt + 1)
-                    }
-                } else {
-                    self.showError(
-                        title: "Sparkz Creator could not start",
-                        message: "Check ~/Library/Logs/Sparkz Creator.log for details."
+                    self.markReadyAndOpen()
+                    return
+                }
+
+                self.noteLogProgress()
+                let elapsed = Date().timeIntervalSince(self.startupStarted)
+                let quietFor = Date().timeIntervalSince(self.lastProgress)
+                if elapsed >= self.maxStartup {
+                    self.showStartupError(
+                        "Startup ran for \(Int(elapsed / 60)) minutes without the website coming up."
                     )
+                    return
+                }
+                if quietFor >= self.stallLimit {
+                    self.showStartupError(
+                        "Startup stalled with no progress for \(Int(quietFor)) seconds."
+                    )
+                    return
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + self.pollInterval) {
+                    self.pollForReadiness()
                 }
             }
         }.resume()
     }
 
+    private func noteLogProgress() {
+        guard let logURL else { return }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: logURL.path),
+              let size = attributes[.size] as? NSNumber else {
+            return
+        }
+        let bytes = size.uint64Value
+        if bytes > lastLogSize {
+            lastLogSize = bytes
+            lastProgress = Date()
+        }
+    }
+
+    private func markReadyAndOpen() {
+        guard !didResolve, !isQuitting else { return }
+        didResolve = true
+        isReady = true
+        NSWorkspace.shared.open(appURL)
+    }
+
     private func launcherDidStop(_ process: Process) {
         guard !isQuitting else { return }
+        let status = process.terminationStatus
         launcher = nil
 
-        showError(
-            title: isReady ? "Sparkz Creator stopped" : "Sparkz Creator could not start",
-            message: "Check ~/Library/Logs/Sparkz Creator.log for details."
-        )
+        if status == 0 {
+            ownsServers = false
+            confirmAlreadyRunning()
+            return
+        }
+        if !didResolve {
+            showStartupError("The launcher exited before the app was ready.")
+        }
+    }
+
+    private func confirmAlreadyRunning() {
+        var request = URLRequest(url: appURL)
+        request.timeoutInterval = 2
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                guard let self, !self.isQuitting else { return }
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if (200..<400).contains(statusCode) {
+                    self.markReadyAndOpen()
+                } else if !self.didResolve {
+                    self.showStartupError("The launcher finished, but the website is not responding.")
+                }
+            }
+        }.resume()
+    }
+
+    private func logTail(maxLines: Int = 8) -> String {
+        guard let logURL,
+              let text = try? String(contentsOf: logURL, encoding: .utf8) else {
+            return ""
+        }
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+        return lines.suffix(maxLines).joined(separator: "\n")
+    }
+
+    private func showStartupError(_ reason: String) {
+        let detail = logTail()
+        let message: String
+        if detail.isEmpty {
+            message = "\(reason)\n\nCheck ~/Library/Logs/Sparkz Creator.log for details."
+        } else {
+            message = "\(reason)\n\n\(detail)"
+        }
+        showError(title: "Sparkz Creator could not start", message: message)
     }
 
     private func showError(title: String, message: String) {
+        guard !isQuitting else { return }
         isQuitting = true
+        didResolve = true
         NSApp.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
@@ -122,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        if isReady, launcher?.isRunning == true {
+        if isReady {
             NSWorkspace.shared.open(appURL)
         }
         return true
@@ -131,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         isQuitting = true
 
-        guard let launcher, launcher.isRunning else {
+        guard ownsServers, let launcher, launcher.isRunning else {
             return .terminateNow
         }
 
