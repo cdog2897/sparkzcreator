@@ -8,6 +8,7 @@ import {
   ArrowUp,
   Copy,
   Download,
+  Film,
   ImagePlus,
   Loader2,
   Plus,
@@ -22,6 +23,9 @@ import {
 const LINE_HEIGHT = 51 / 43;
 const FRAME_WIDTH = 1080;
 const FRAME_HEIGHT = 1920;
+const DEFAULT_SLIDE_SECONDS = 2.75;
+const DEFAULT_FIRST_SLIDE_SECONDS = 4;
+const DEFAULT_CROSSFADE_SECONDS = 0.35;
 
 const TEXT_DEFAULTS = {
   x: 130,
@@ -231,6 +235,21 @@ function estimateBlockHeight(element) {
   return Math.max(element.fontSize * element.lineHeight, lineCount * element.fontSize * element.lineHeight);
 }
 
+function quantizeReelSeconds(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+  return Math.max(1, Math.round(seconds * 30)) / 30;
+}
+
+function reelDuration(slideCount, seconds, firstSeconds, fadeSeconds) {
+  if (slideCount < 1) return 0;
+  const perSlide = quantizeReelSeconds(seconds);
+  const first = firstSeconds == null ? perSlide : quantizeReelSeconds(firstSeconds);
+  const holds = Array.from({ length: slideCount }, (_, index) => (index === 0 ? first : perSlide));
+  const fade = slideCount > 1 ? quantizeReelSeconds(fadeSeconds) : 0;
+  const overlap = slideCount > 1 ? (slideCount - 1) * fade : 0;
+  return Math.max(0, holds.reduce((total, hold) => total + hold, 0) - overlap);
+}
+
 function slideSnippet(slide, index) {
   const text = slide.elements.find((element) => element.type === 'text' && element.text.trim());
   if (!text) return `Slide ${index + 1}`;
@@ -250,10 +269,19 @@ export default function TextSlideshow({ onHome }) {
   const [previews, setPreviews] = useState({});
   const [error, setError] = useState('');
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingVideo, setIsExportingVideo] = useState(false);
+  const [slideSeconds, setSlideSeconds] = useState(DEFAULT_SLIDE_SECONDS);
+  const [holdFirstSlide, setHoldFirstSlide] = useState(false);
+  const [firstSlideSeconds, setFirstSlideSeconds] = useState(DEFAULT_FIRST_SLIDE_SECONDS);
+  const [transition, setTransition] = useState('cut');
+  const [fadeSeconds, setFadeSeconds] = useState(DEFAULT_CROSSFADE_SECONDS);
+  const [audioFile, setAudioFile] = useState(null);
+  const [reelMessage, setReelMessage] = useState('');
   const frameRef = useRef(null);
   const dragRef = useRef(null);
   const backgroundInputRef = useRef(null);
   const overlayInputRef = useRef(null);
+  const audioInputRef = useRef(null);
 
   const slide = slides[selected] || slides[0];
   const selectedElement = slide?.elements.find((element) => element.id === selectedElementId) || null;
@@ -495,7 +523,7 @@ export default function TextSlideshow({ onHome }) {
   }
 
   async function exportZip() {
-    if (isExporting) return;
+    if (isExporting || isExportingVideo) return;
     setIsExporting(true);
     setError('');
     try {
@@ -521,7 +549,63 @@ export default function TextSlideshow({ onHome }) {
     }
   }
 
+  async function exportReel() {
+    if (isExporting || isExportingVideo) return;
+    const seconds = Number(slideSeconds);
+    const firstSeconds = Number(firstSlideSeconds);
+    if (!Number.isFinite(seconds) || seconds < 0.5 || seconds > 20) {
+      setError('Seconds per slide must be between 0.5 and 20.');
+      return;
+    }
+    if (holdFirstSlide && (!Number.isFinite(firstSeconds) || firstSeconds < 0.5 || firstSeconds > 20)) {
+      setError('First slide seconds must be between 0.5 and 20.');
+      return;
+    }
+    setIsExportingVideo(true);
+    setError('');
+    setReelMessage('');
+    try {
+      const body = new FormData();
+      body.set('slides', JSON.stringify(slides.map(toApiSlide)));
+      body.set('seconds_per_slide', String(slideSeconds));
+      body.set('crossfade_seconds', transition === 'fade' ? String(fadeSeconds) : '0');
+      if (holdFirstSlide) body.set('first_slide_seconds', String(firstSlideSeconds));
+      if (audioFile) body.set('audio', audioFile, audioFile.name);
+      const response = await fetch('/api/text-slideshow/export-video', {
+        method: 'POST',
+        body,
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'video.mp4';
+      link.click();
+      URL.revokeObjectURL(url);
+      const duration = Number(response.headers.get('x-video-duration'));
+      const folder = response.headers.get('x-output-folder');
+      const length = Number.isFinite(duration) ? `${duration.toFixed(2)}s` : 'the Reel';
+      setReelMessage(
+        folder
+          ? `Saved ${length} as video.mp4 in outputs/${folder}.`
+          : `Downloaded ${length}.`,
+      );
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setIsExportingVideo(false);
+    }
+  }
+
   const previewUrl = slide ? previews[slide.id] : '';
+  const fadeForEstimate = transition === 'fade' ? Number(fadeSeconds) || 0 : 0;
+  const estimatedLength = reelDuration(
+    slides.length,
+    Number(slideSeconds) || 0,
+    holdFirstSlide ? Number(firstSlideSeconds) || 0 : null,
+    fadeForEstimate,
+  );
 
   return (
     <div className="app-shell">
@@ -539,7 +623,7 @@ export default function TextSlideshow({ onHome }) {
         <div className="topbar-metrics" aria-label="slide size">
           <span>{slides.length} slides</span>
           <span>1080×1920</span>
-          <span>PNG</span>
+          <span>PNG · Reel</span>
         </div>
       </header>
 
@@ -551,7 +635,7 @@ export default function TextSlideshow({ onHome }) {
               <Type size={16} />
               <div>
                 <h2>Slides</h2>
-                <span>Add, duplicate, and reorder. Each one exports as a PNG.</span>
+                <span>Add, duplicate, and reorder. Export PNGs or a Reel.</span>
               </div>
             </div>
             <ol className="tsl-slides">
@@ -600,6 +684,106 @@ export default function TextSlideshow({ onHome }) {
               <Plus size={14} />
               Add slide
             </button>
+          </div>
+
+          <div className="slideshow-section">
+            <div className="slideshow-heading">
+              <Film size={16} />
+              <div>
+                <h2>Reel</h2>
+                <span>1080×1920, 30fps, H.264. Hard cuts unless you crossfade.</span>
+              </div>
+            </div>
+            <div className="tsl-reel">
+              <label>
+                Seconds per slide
+                <input
+                  max="20"
+                  min="0.5"
+                  onChange={(event) => setSlideSeconds(event.target.value)}
+                  step="0.05"
+                  type="number"
+                  value={slideSeconds}
+                />
+              </label>
+              <label className="tsl-check">
+                <input
+                  checked={holdFirstSlide}
+                  onChange={(event) => setHoldFirstSlide(event.target.checked)}
+                  type="checkbox"
+                />
+                Hold the first slide longer
+              </label>
+              {holdFirstSlide ? (
+                <label>
+                  First slide seconds
+                  <input
+                    max="20"
+                    min="0.5"
+                    onChange={(event) => setFirstSlideSeconds(event.target.value)}
+                    step="0.05"
+                    type="number"
+                    value={firstSlideSeconds}
+                  />
+                </label>
+              ) : null}
+              <label>
+                Transition
+                <select onChange={(event) => setTransition(event.target.value)} value={transition}>
+                  <option value="cut">Hard cut</option>
+                  <option value="fade">Crossfade</option>
+                </select>
+              </label>
+              {transition === 'fade' ? (
+                <label>
+                  Crossfade seconds
+                  <input
+                    max="1.5"
+                    min="0.1"
+                    onChange={(event) => setFadeSeconds(event.target.value)}
+                    step="0.05"
+                    type="number"
+                    value={fadeSeconds}
+                  />
+                </label>
+              ) : null}
+              <div className="tsl-audio-row">
+                <button
+                  className="secondary-button"
+                  onClick={() => audioInputRef.current?.click()}
+                  type="button"
+                >
+                  <Upload size={14} />
+                  {audioFile ? audioFile.name : 'Add audio'}
+                </button>
+                {audioFile ? (
+                  <button
+                    className="secondary-button"
+                    onClick={() => setAudioFile(null)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                ) : null}
+                <input
+                  accept="audio/*,.mp3,.m4a,.aac,.wav,.mp4,.mov"
+                  hidden
+                  onChange={(event) => {
+                    setAudioFile(event.target.files?.[0] || null);
+                    event.target.value = '';
+                  }}
+                  ref={audioInputRef}
+                  type="file"
+                />
+              </div>
+              <p className="tsl-reel-note">
+                About {estimatedLength.toFixed(2)}s.
+                {' '}
+                {audioFile
+                  ? 'The track is looped or trimmed to the video, then fades out.'
+                  : 'No audio still includes a silent track.'}
+              </p>
+            </div>
           </div>
 
           {slide ? (
@@ -717,14 +901,30 @@ export default function TextSlideshow({ onHome }) {
             </div>
           </div>
           <div className="slideshow-stage-actions">
-            <button className="primary-button" disabled={isExporting} onClick={exportZip} type="button">
+            <button
+              className="primary-button"
+              disabled={isExporting || isExportingVideo}
+              onClick={exportZip}
+              type="button"
+            >
               {isExporting ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
               Download PNGs
+            </button>
+            <button
+              className="primary-button"
+              disabled={isExporting || isExportingVideo}
+              onClick={exportReel}
+              type="button"
+            >
+              {isExportingVideo ? <Loader2 className="spin" size={16} /> : <Film size={16} />}
+              Download Reel
             </button>
           </div>
           <p className="tsl-note">
             Drag a box to move it. Drag the side handles to change how wide the text wraps.
-            The preview is the same render as the PNG export.
+            The preview is the same render as the PNG export. Download Reel saves video.mp4
+            in that deck’s output folder.
+            {reelMessage ? ` ${reelMessage}` : ''}
           </p>
         </section>
 

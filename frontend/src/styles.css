@@ -3769,8 +3769,44 @@ button {
   font-size: 12px;
   line-height: 1.45;
   margin: 0;
-  max-width: 360px;
+  max-width: 420px;
   text-align: center;
+}
+
+.tsl-reel {
+  display: grid;
+  gap: 8px;
+}
+
+.tsl-reel label:not(.tsl-check) {
+  color: var(--muted);
+  display: grid;
+  font-family: var(--font-utility);
+  font-size: 12px;
+  gap: 4px;
+}
+
+.tsl-reel input[type='number'],
+.tsl-reel select {
+  width: 100%;
+}
+
+.tsl-audio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tsl-audio-row .secondary-button {
+  min-width: 0;
+}
+
+.tsl-reel-note {
+  color: var(--muted);
+  font-family: var(--font-utility);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
 }
 
 @media (max-width: 1100px) {

@@ -108,7 +108,7 @@ python3 -m uvicorn web_app:app --host 127.0.0.1 --port 8000
 cd frontend && npm run dev
 ```
 
-ffmpeg is installed with the Python dependencies through `imageio-ffmpeg`, so a separate ffmpeg install is not required.
+ffmpeg is installed with the Python dependencies through `imageio-ffmpeg`, so a separate ffmpeg install is not required. Text Slideshow Reels prefers `FFMPEG_PATH` or `ffmpeg` on `PATH` when that build has libx264 and AAC, and otherwise uses the same bundled binary.
 
 To add another tool, append it to `frontend/src/tools.js` with a name, description, icon, route, and component. Home and the router both read that list. The component receives `{ onHome }` so it can return to Home.
 
@@ -124,16 +124,74 @@ Drop in photos (or choose several at once), drag or use the arrows to reorder th
 
 The text is centered horizontally and sits at the same vertical center as the 960×576 reference. It is drawn in TikTok Sans SemiBold at TikTok's yellow swatch `#F2CD46`, with no outline or shadow, and the size scales with the frame width so it covers the same share of the picture. TikTok's in-app Classic style is Proxima Nova Semibold, which is commercial and not bundled. TikTok Sans is the SIL Open Font License face in `fonts/TikTokSans/`.
 
+Music is optional. Leave the picker on Random to use a track from `music/` (trimmed to the video), choose No music, or upload a track. Put files in `music/` yourself if you already have them. Render, preview the MP4, and download it from `outputs/`. The default canvas is 1920×1080 at 24fps. Every photo is scaled to cover that frame and center-cropped, so portrait and landscape sources fill the picture with no black bars.
+
 ### Text Slideshow
 
 Open Home → Text Slideshow, or go to `http://127.0.0.1:5173/tools/text-slideshow`.
 
-This one exports still PNGs, 1080×1920, for a TikTok photo carousel. There is no music and no video. Each slide has a background photo (cover-cropped, no dimming) or a two-color gradient, any number of text boxes, and any number of image overlays.
+Each slide is 1080×1920, for a TikTok photo carousel or an Instagram Reel. A slide has a background photo (cover-cropped, no dimming) or a two-color gradient, any number of text boxes, and any number of image overlays.
 
 Text is TikTok Sans. The weight menu lists the files in `fonts/TikTokSans/` (Regular, Medium, SemiBold, Bold). **Add title** drops a box in the reference heading style: SemiBold, 53px, `#000000`, centered, 820px wide, starting at the measured vertical position. **Add body text** uses Medium at 43px with a line pitch of 51px, so a blank line in the text is the paragraph gap from the reference. **Add label** turns on the black rounded highlight (12px corners, white text, Medium 41px) used for the “se llama …” tag. Drag a box to move it. Drag the side handles to change the wrap width. Image overlays keep their aspect ratio unless you unlock it, and they default to a 16px corner radius like the reference screenshot. Bring forward and send back change the layer order.
 
-The on-screen preview is a PNG from the same Pillow renderer as the export, so what you see is what downloads. Export writes `01.png`, `02.png`, … into `outputs/<timestamp>_textslides/` and downloads a zip of those files.
+The on-screen preview is a PNG from the same Pillow renderer as the export, so what you see is what downloads. **Download PNGs** writes `01.png`, `02.png`, … into `outputs/<timestamp>_textslides/` and downloads a zip of those files. That export is unchanged.
+
+**Download Reel** uses those same frames to make `video.mp4` in that output folder and downloads it. The file is 1080×1920 H.264 (`yuv420p`, High profile, Rec. 709), 30fps, with AAC audio and the moov atom at the front, so Instagram Reels can play it. Each slide stays up for the seconds you set (default 2.75). Turn on **Hold the first slide longer** when the cover should sit a bit longer than the rest. The default join is a hard cut. Choose **Crossfade** for a short dissolve (default 0.35s, at most 1.5s, and always shorter than a slide). Add an audio file if you want music: a shorter track loops, a longer one is trimmed, and the end fades out over about half a second. Leave audio empty and the video still has a silent AAC track.
 
 The demo deck is English placeholder copy in that measured layout, so you can try it before uploading photos.
 
-Music is optional. Leave the picker on Random to use a track from `music/` (trimmed to the video), choose No music, or upload a track. Put files in `music/` yourself if you already have them. Render, preview the MP4, and download it from `outputs/`. The default canvas is 1920×1080 at 24fps. Every photo is scaled to cover that frame and center-cropped, so portrait and landscape sources fill the picture with no black bars.
+### Text Slideshow batch export
+
+The same renderer runs from the command line, for one deck or a folder of them:
+
+```bash
+python3 text_slideshow_video.py path/to/decks
+python3 text_slideshow_video.py path/to/one-deck --seconds 2.75 --first-seconds 4
+python3 text_slideshow_video.py path/to/one-deck --audio song.mp3 --fade 0.35
+```
+
+A deck is either:
+
+- a folder with `deck.json` (and the images it names), or
+- a folder of numbered PNG slides, such as `01.png`, `02.png`, from an earlier export.
+
+A directory of those decks is a batch. JSON decks write `output/video.mp4` plus the numbered PNGs. A folder that is already PNG slides gets `video.mp4` next to them. `--output` sets the mp4 path for a single deck.
+
+`deck.json` uses the same slide objects as the export API:
+
+```json
+{
+  "slides": [
+    {
+      "background_color": "#f4d5c4",
+      "background_color_2": "#d7e6f6",
+      "background_asset_id": null,
+      "elements": [
+        {
+          "type": "text",
+          "text": "how to be a better partner",
+          "x": 130,
+          "y": 352,
+          "width": 820,
+          "font_weight": "medium",
+          "font_size": 66,
+          "color": "#000000",
+          "align": "center",
+          "line_height": 1.186
+        }
+      ]
+    }
+  ],
+  "assets": {},
+  "seconds_per_slide": 2.75,
+  "first_slide_seconds": 4,
+  "crossfade_seconds": 0,
+  "audio": "song.mp3"
+}
+```
+
+`assets` maps an id used by `background_asset_id` or an image element to a path relative to the deck folder. If an id is omitted, the exporter also looks for `assets/<id>.png`. `audio` is optional and relative to the deck. Omit `first_slide_seconds` to hold every slide for the same length. `crossfade_seconds: 0` is a hard cut.
+
+`POST /api/text-slideshow/export-video` is the same render, as multipart form fields: `slides` (JSON), `seconds_per_slide`, `first_slide_seconds`, `crossfade_seconds`, and an optional `audio` file or `music_name` from `music/`. The response is the mp4. PNG export stays on `POST /api/text-slideshow/export`.
+
+ffmpeg is detected in this order: `FFMPEG_PATH`, then `ffmpeg` on `PATH`, then the binary bundled with `imageio-ffmpeg`. `python3 -m pip install -r requirements.txt` installs that bundle, which is also what `Run App.command` installs, so a separate ffmpeg install is optional. The binary needs libx264 and AAC. On a Mac, `brew install ffmpeg` is enough if you want the system one to win.

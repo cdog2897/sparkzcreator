@@ -27,7 +27,7 @@ export const tools = [
   {
     id: 'text-slideshow',
     name: 'Text Slideshow',
-    description: 'Lay out text and pictures on 1080×1920 slides, then export PNGs for a TikTok photo carousel.',
+    description: 'Lay out text and pictures on 1080×1920 slides, then export PNGs or an Instagram Reel.',
     icon: Type,
     route: '/tools/text-slideshow',
     component: TextSlideshow,
