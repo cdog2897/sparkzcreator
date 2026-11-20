@@ -276,6 +276,12 @@ export default function TextSlideshow({ onHome }) {
   const [transition, setTransition] = useState('cut');
   const [fadeSeconds, setFadeSeconds] = useState(DEFAULT_CROSSFADE_SECONDS);
   const [audioFile, setAudioFile] = useState(null);
+  const [audioPreviewUrl, setAudioPreviewUrl] = useState('');
+  const [musicTracks, setMusicTracks] = useState([]);
+  const [selectedMusicName, setSelectedMusicName] = useState('');
+  const [musicUrl, setMusicUrl] = useState('');
+  const [useChromeLogin, setUseChromeLogin] = useState(false);
+  const [isImportingMusic, setIsImportingMusic] = useState(false);
   const [reelMessage, setReelMessage] = useState('');
   const frameRef = useRef(null);
   const dragRef = useRef(null);
@@ -285,6 +291,30 @@ export default function TextSlideshow({ onHome }) {
 
   const slide = slides[selected] || slides[0];
   const selectedElement = slide?.elements.find((element) => element.id === selectedElementId) || null;
+  const selectedTrack = musicTracks.find((track) => track.name === selectedMusicName) || null;
+
+  useEffect(() => {
+    let mounted = true;
+    fetch('/api/music')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        if (mounted && payload?.music) setMusicTracks(payload.music);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!audioFile) {
+      setAudioPreviewUrl('');
+      return undefined;
+    }
+    const url = URL.createObjectURL(audioFile);
+    setAudioPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [audioFile]);
 
   useEffect(() => {
     let mounted = true;
@@ -549,6 +579,39 @@ export default function TextSlideshow({ onHome }) {
     }
   }
 
+  async function fetchMusicFromUrl() {
+    const url = musicUrl.trim();
+    if (!url) {
+      setError('Enter an Instagram video URL.');
+      return;
+    }
+    setError('');
+    setIsImportingMusic(true);
+    try {
+      const response = await fetch('/api/music/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url,
+          use_browser_cookies: useChromeLogin,
+          browser: 'chrome',
+        }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const payload = await response.json();
+      setMusicTracks(payload.music || []);
+      if (payload.track?.name) {
+        setSelectedMusicName(payload.track.name);
+        setAudioFile(null);
+      }
+      setMusicUrl('');
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setIsImportingMusic(false);
+    }
+  }
+
   async function exportReel() {
     if (isExporting || isExportingVideo) return;
     const seconds = Number(slideSeconds);
@@ -571,6 +634,7 @@ export default function TextSlideshow({ onHome }) {
       body.set('crossfade_seconds', transition === 'fade' ? String(fadeSeconds) : '0');
       if (holdFirstSlide) body.set('first_slide_seconds', String(firstSlideSeconds));
       if (audioFile) body.set('audio', audioFile, audioFile.name);
+      else if (selectedMusicName) body.set('music_name', selectedMusicName);
       const response = await fetch('/api/text-slideshow/export-video', {
         method: 'POST',
         body,
@@ -747,6 +811,77 @@ export default function TextSlideshow({ onHome }) {
                   />
                 </label>
               ) : null}
+              <div className="tsl-music">
+                <span className="tsl-music-label">Music from URL</span>
+                <div className="music-import-controls">
+                  <div className="music-import-row">
+                    <input
+                      className="url-input"
+                      disabled={isImportingMusic}
+                      onChange={(event) => setMusicUrl(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          fetchMusicFromUrl();
+                        }
+                      }}
+                      placeholder="Instagram reel or video URL"
+                      type="url"
+                      value={musicUrl}
+                    />
+                    <button
+                      className="secondary-button"
+                      disabled={isImportingMusic || !musicUrl.trim()}
+                      onClick={fetchMusicFromUrl}
+                      type="button"
+                    >
+                      {isImportingMusic ? <Loader2 className="spin" size={14} /> : <Download size={14} />}
+                      Fetch MP3
+                    </button>
+                  </div>
+                  <label className="instagram-login-option">
+                    <input
+                      checked={useChromeLogin}
+                      disabled={isImportingMusic}
+                      onChange={(event) => setUseChromeLogin(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Use Chrome login for restricted posts</span>
+                  </label>
+                </div>
+                <label>
+                  Saved tracks
+                  <select
+                    onChange={(event) => {
+                      setSelectedMusicName(event.target.value);
+                      if (event.target.value) {
+                        setAudioFile(null);
+                        setError('');
+                      }
+                    }}
+                    value={selectedMusicName}
+                  >
+                    <option value="">None</option>
+                    {musicTracks.map((track) => (
+                      <option key={track.name} value={track.name}>
+                        {track.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {selectedTrack ? (
+                  <audio
+                    className="audio-preview"
+                    controls
+                    key={selectedTrack.name}
+                    src={selectedTrack.url}
+                  />
+                ) : audioPreviewUrl ? (
+                  <audio className="audio-preview" controls src={audioPreviewUrl} />
+                ) : (
+                  <div className="audio-placeholder">Fetch a URL or pick a saved MP3 to preview it.</div>
+                )}
+              </div>
               <div className="tsl-audio-row">
                 <button
                   className="secondary-button"
@@ -754,7 +889,7 @@ export default function TextSlideshow({ onHome }) {
                   type="button"
                 >
                   <Upload size={14} />
-                  {audioFile ? audioFile.name : 'Add audio'}
+                  {audioFile ? audioFile.name : 'Add audio file'}
                 </button>
                 {audioFile ? (
                   <button
@@ -769,7 +904,9 @@ export default function TextSlideshow({ onHome }) {
                   accept="audio/*,.mp3,.m4a,.aac,.wav,.mp4,.mov"
                   hidden
                   onChange={(event) => {
-                    setAudioFile(event.target.files?.[0] || null);
+                    const file = event.target.files?.[0] || null;
+                    setAudioFile(file);
+                    if (file) setSelectedMusicName('');
                     event.target.value = '';
                   }}
                   ref={audioInputRef}
@@ -779,9 +916,9 @@ export default function TextSlideshow({ onHome }) {
               <p className="tsl-reel-note">
                 About {estimatedLength.toFixed(2)}s.
                 {' '}
-                {audioFile
+                {audioFile || selectedTrack
                   ? 'The track is looped or trimmed to the video, then fades out.'
-                  : 'No audio still includes a silent track.'}
+                  : 'No audio still includes a silent track. Fetched audio is saved as MP3 in music/.'}
               </p>
             </div>
           </div>

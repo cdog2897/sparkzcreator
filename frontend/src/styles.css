@@ -3801,6 +3801,34 @@ button {
   min-width: 0;
 }
 
+.tsl-music {
+  display: grid;
+  gap: 8px;
+}
+
+.tsl-music-label {
+  color: var(--heading);
+  font-family: var(--font-utility);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.tsl-reel label.instagram-login-option {
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.tsl-reel .audio-preview,
+.tsl-reel .audio-placeholder {
+  width: 100%;
+}
+
+.tsl-reel .audio-placeholder {
+  font-size: 12px;
+  text-align: center;
+}
+
 .tsl-reel-note {
   color: var(--muted);
   font-family: var(--font-utility);

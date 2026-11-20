@@ -23,6 +23,7 @@ from text_slideshow_video import (
     REEL_WIDTH,
     VIDEO_FILENAME,
     audio_fade_out_seconds,
+    audio_from_url,
     build_reel_command,
     collect_decks,
     export_decks,
@@ -414,6 +415,96 @@ class ReelBatchTests(unittest.TestCase):
             missing = Path(temp_name) / "nope"
             self.assertEqual(main([str(missing)]), 1)
 
+    def test_cli_audio_url_uses_the_saved_mp3(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            deck = root / "deck"
+            deck.mkdir()
+            (deck / "deck.json").write_text(json.dumps({
+                "slides": [_slide("#202020")],
+                "seconds_per_slide": 0.5,
+            }), encoding="utf-8")
+            tone = root / "reel-saved.wav"
+            _write_tone(tone, 0.2)
+            url = "https://www.instagram.com/reel/example/"
+
+            def fake_import(imported_url: str, browser: str | None = None) -> Path:
+                self.assertEqual(imported_url, url)
+                self.assertIsNone(browser)
+                return tone
+
+            with patch("web_app.import_instagram_music", side_effect=fake_import):
+                code = main([str(deck), "--audio-url", url, "--seconds", "0.5"])
+
+            video = deck / "output" / "video.mp4"
+            self.assertEqual(code, 0)
+            self.assertTrue(video.is_file())
+            self.assertGreater(_mean_volume(video, 0.05, 0.2), -40)
+
+    def test_cli_audio_url_can_use_the_chrome_login(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            deck = root / "deck"
+            deck.mkdir()
+            (deck / "deck.json").write_text(json.dumps({
+                "slides": [_slide("#111111")],
+            }), encoding="utf-8")
+            tone = root / "chrome.mp3"
+            tone.write_bytes(b"not-read")
+            url = "https://www.instagram.com/reel/chrome/"
+
+            with patch("web_app.import_instagram_music", return_value=tone) as mocked:
+                with patch("text_slideshow_video.export_decks", return_value=[]) as exported:
+                    code = main([
+                        str(deck),
+                        "--audio-url",
+                        url,
+                        "--chrome-login",
+                    ])
+
+            self.assertEqual(code, 0)
+            mocked.assert_called_once_with(url, browser="chrome")
+            self.assertEqual(exported.call_args.kwargs["audio_path"], tone)
+
+    def test_cli_audio_url_rejects_a_non_instagram_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            deck = Path(temp_name) / "deck"
+            deck.mkdir()
+            (deck / "deck.json").write_text(json.dumps({
+                "slides": [_slide("#111111")],
+            }), encoding="utf-8")
+            code = main([
+                str(deck),
+                "--audio-url",
+                "https://www.tiktok.com/@example/video/1",
+            ])
+            self.assertEqual(code, 1)
+            self.assertFalse((deck / "output" / "video.mp4").exists())
+
+    def test_cli_rejects_an_audio_file_and_an_audio_url_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            deck = Path(temp_name) / "deck"
+            deck.mkdir()
+            (deck / "deck.json").write_text("{}", encoding="utf-8")
+            tone = Path(temp_name) / "tone.wav"
+            _write_tone(tone, 0.1)
+            code = main([
+                str(deck),
+                "--audio",
+                str(tone),
+                "--audio-url",
+                "https://www.instagram.com/reel/example/",
+            ])
+            self.assertEqual(code, 1)
+            self.assertFalse((deck / "output" / "video.mp4").exists())
+
+    def test_audio_from_url_reuses_the_instagram_importer(self) -> None:
+        tone = Path("music/reel-test.mp3")
+        with patch("web_app.import_instagram_music", return_value=tone) as mocked:
+            saved = audio_from_url("  https://www.instagram.com/reel/example/  ", browser="chrome")
+        self.assertEqual(saved, tone)
+        mocked.assert_called_once_with("https://www.instagram.com/reel/example/", browser="chrome")
+
 
 class ReelApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -473,6 +564,37 @@ class ReelApiTests(unittest.TestCase):
         video = folder / "video.mp4"
         self.assertAlmostEqual(_duration(video), 1.0, delta=0.04)
         self.assertGreater(_mean_volume(video, 0.25, 0.2), -35)
+
+    def test_export_video_uses_a_saved_music_track(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            music_dir = Path(temp_name)
+            tone = music_dir / "pulled.wav"
+            _write_tone(tone, 0.4)
+            with patch("web_app.MUSIC_DIR", music_dir):
+                response = self.client.post(
+                    "/api/text-slideshow/export-video",
+                    data={
+                        "slides": json.dumps([_slide("#445566")]),
+                        "seconds_per_slide": "1",
+                        "music_name": "pulled.wav",
+                    },
+                )
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        folder = self._keep(response)
+        video = folder / "video.mp4"
+        self.assertGreater(_mean_volume(video, 0.2, 0.2), -35)
+
+    def test_export_video_rejects_an_unknown_music_track(self) -> None:
+        response = self.client.post(
+            "/api/text-slideshow/export-video",
+            data={
+                "slides": json.dumps([_slide("#000000")]),
+                "seconds_per_slide": "0.5",
+                "music_name": "missing-reel-track.mp3",
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("Unknown music track", response.json()["detail"])
 
     def test_export_video_rejects_a_bad_duration(self) -> None:
         response = self.client.post(

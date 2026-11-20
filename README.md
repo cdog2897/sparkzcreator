@@ -138,6 +138,8 @@ The on-screen preview is a PNG from the same Pillow renderer as the export, so w
 
 **Download Reel** uses those same frames to make `video.mp4` in that output folder and downloads it. The file is 1080×1920 H.264 (`yuv420p`, High profile, Rec. 709), 30fps, with AAC audio and the moov atom at the front, so Instagram Reels can play it. Each slide stays up for the seconds you set (default 2.75). Turn on **Hold the first slide longer** when the cover should sit a bit longer than the rest. The default join is a hard cut. Choose **Crossfade** for a short dissolve (default 0.35s, at most 1.5s, and always shorter than a slide). Add an audio file if you want music: a shorter track loops, a longer one is trimmed, and the end fades out over about half a second. Leave audio empty and the video still has a silent AAC track.
 
+**Music from URL** uses the same importer as the original music tab. Paste an Instagram reel or video URL, then **Fetch MP3**. The app downloads the video, converts the audio to MP3, and saves it in `music/` so you can reuse it. Turn on **Use Chrome login for restricted posts** when Instagram blocks anonymous access. **Saved tracks** lists everything already in `music/`, including MP3s fetched earlier. Pick one to preview it and to use it as this Reel's background. A file you add from disk is used instead of the saved-track pick. Either way the track is looped or trimmed to the video and fades out at the end.
+
 The demo deck is English placeholder copy in that measured layout, so you can try it before uploading photos.
 
 ### Text Slideshow batch export
@@ -148,6 +150,8 @@ The same renderer runs from the command line, for one deck or a folder of them:
 python3 text_slideshow_video.py path/to/decks
 python3 text_slideshow_video.py path/to/one-deck --seconds 2.75 --first-seconds 4
 python3 text_slideshow_video.py path/to/one-deck --audio song.mp3 --fade 0.35
+python3 text_slideshow_video.py path/to/decks --audio-url "https://www.instagram.com/reel/XXXX/"
+python3 text_slideshow_video.py path/to/one-deck --audio-url "https://www.instagram.com/reel/XXXX/" --chrome-login
 ```
 
 A deck is either:
@@ -192,6 +196,8 @@ A directory of those decks is a batch. JSON decks write `output/video.mp4` plus 
 
 `assets` maps an id used by `background_asset_id` or an image element to a path relative to the deck folder. If an id is omitted, the exporter also looks for `assets/<id>.png`. `audio` is optional and relative to the deck. Omit `first_slide_seconds` to hold every slide for the same length. `crossfade_seconds: 0` is a hard cut.
 
-`POST /api/text-slideshow/export-video` is the same render, as multipart form fields: `slides` (JSON), `seconds_per_slide`, `first_slide_seconds`, `crossfade_seconds`, and an optional `audio` file or `music_name` from `music/`. The response is the mp4. PNG export stays on `POST /api/text-slideshow/export`.
+`--audio-url` calls the same Instagram importer as **Music from URL** in the editor (`import_instagram_music`). It accepts an Instagram reel or video URL, writes an MP3 into `music/`, and uses that file for every deck in the batch. `--chrome-login` reads the Chrome login for a post Instagram will not serve anonymously. Pass `--audio` or `--audio-url`, not both. The saved track is still looped or trimmed to the video, with the same short fade out.
+
+`POST /api/text-slideshow/export-video` is the same render, as multipart form fields: `slides` (JSON), `seconds_per_slide`, `first_slide_seconds`, `crossfade_seconds`, and an optional `audio` file or `music_name` from `music/`. Fetching a URL is the existing `POST /api/music/import` (body: `url`, optional `use_browser_cookies`). The editor fetches first, then exports with the saved `music_name`. The response is the mp4. PNG export stays on `POST /api/text-slideshow/export`.
 
 ffmpeg is detected in this order: `FFMPEG_PATH`, then `ffmpeg` on `PATH`, then the binary bundled with `imageio-ffmpeg`. `python3 -m pip install -r requirements.txt` installs that bundle, which is also what `Run App.command` installs, so a separate ffmpeg install is optional. The binary needs libx264 and AAC. On a Mac, `brew install ffmpeg` is enough if you want the system one to win.

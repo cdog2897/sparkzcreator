@@ -17,6 +17,7 @@ Batch example::
     python3 text_slideshow_video.py path/to/decks
     python3 text_slideshow_video.py path/to/one-deck --seconds 2.75 --first-seconds 4
     python3 text_slideshow_video.py path/to/one-deck --audio song.mp3 --fade 0.35
+    python3 text_slideshow_video.py path/to/decks --audio-url "https://www.instagram.com/reel/XXXX/"
 """
 
 from __future__ import annotations
@@ -581,6 +582,21 @@ def resolve_deck_assets(deck_dir: Path, document: dict) -> dict[str, Path]:
     return resolved
 
 
+def audio_from_url(url: str, *, browser: str | None = None) -> Path:
+    """Save an Instagram reel's audio with the app's existing music importer.
+
+    ``import_instagram_music`` downloads the video, converts the audio to MP3,
+    and stores it in ``music/``. This wrapper only checks the URL is present
+    and forwards the same Chrome-login option the editor already uses.
+    """
+    cleaned = url.strip()
+    if not cleaned:
+        raise ValueError("Enter an Instagram video URL.")
+    from web_app import import_instagram_music
+
+    return import_instagram_music(cleaned, browser=browser)
+
+
 def _resolve_audio(deck_dir: Path, document: dict, override: Path | None) -> Path | None:
     if override is not None:
         if not override.is_file():
@@ -732,6 +748,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional music file. Looped or trimmed to the video, with a short fade out.",
     )
     parser.add_argument(
+        "--audio-url",
+        default=None,
+        help=(
+            "Instagram reel or video URL. The existing importer saves an MP3 in "
+            "music/ and that file is the Reel track (looped or trimmed, then faded)."
+        ),
+    )
+    parser.add_argument(
+        "--chrome-login",
+        action="store_true",
+        help="With --audio-url, read the Chrome login when Instagram blocks anonymous access.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -743,18 +772,32 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    audio_path = args.audio
+    imported_audio = False
     try:
+        if args.audio is not None and args.audio_url:
+            raise ValueError("Pass --audio or --audio-url, not both.")
+        if args.audio_url:
+            collect_decks(args.path)
+            audio_path = audio_from_url(
+                args.audio_url,
+                browser="chrome" if args.chrome_login else None,
+            )
+            imported_audio = True
         results = export_decks(
             args.path,
             seconds_per_slide=args.seconds,
             first_slide_seconds=args.first_seconds,
             crossfade_seconds=args.fade,
-            audio_path=args.audio,
+            audio_path=audio_path,
             output_path=args.output,
         )
     except (ValueError, RuntimeError, OSError) as error:
         print(f"Could not export: {error}", file=sys.stderr)
         return 1
+
+    if imported_audio and audio_path is not None:
+        print(f"Saved {audio_path}")
 
     for result in results:
         holds = ", ".join(_format_seconds(seconds) for seconds in result.plan.slide_durations)
