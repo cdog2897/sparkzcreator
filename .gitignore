@@ -1,5 +1,9 @@
 outputs/*.mp4
+outputs/**/*.mp4
 outputs/*.jpg
+outputs/*.png
+outputs/*.zip
+outputs/*_textslides/
 tmp*
 .pycache/
 .DS_Store

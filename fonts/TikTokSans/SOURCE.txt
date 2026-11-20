@@ -3,13 +3,14 @@ Copyright 2024 TikTok Inc.
 Licensed under the SIL Open Font License, Version 1.1. See OFL.txt.
 Source: https://github.com/tiktok/TikTokSans and the Google Fonts OFL release.
 
-TikTokSans-SemiBold.ttf is a static instance of the variable font
-TikTokSans[opsz,slnt,wdth,wght].ttf, instantiated at optical size 36,
-width 100, weight 600, slant 0. ffmpeg drawtext loads this file directly.
+The static files are instances of the variable font
+TikTokSans[opsz,slnt,wdth,wght].ttf at optical size 36, width 100, slant 0:
 
-Weight 600 (SemiBold) matched the reference glyphs more closely than
-weight 500 (Medium). At 960px wide, SemiBold line widths were 329px and
-349px against the measured 328px and 348px.
+- TikTokSans-Regular.ttf    weight 400
+- TikTokSans-Medium.ttf     weight 500
+- TikTokSans-SemiBold.ttf   weight 600
+- TikTokSans-Bold.ttf       weight 700
 
-TikTok's in-app Classic text style is Proxima Nova, a commercial face.
-It is not bundled. The overlay uses TikTok Sans SemiBold instead.
+ffmpeg drawtext loads TikTokSans-SemiBold.ttf directly. The text slideshow
+uses the same files through Pillow. Weight 600 matched the Brochi tip titles
+and weight 500 matched the body copy.

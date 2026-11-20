@@ -97,7 +97,23 @@ npm run dev
 
 Open the Vite URL, usually `http://127.0.0.1:5173`. The app opens on a Home screen. Home lists every tool in `frontend/src/tools.js`. A direct link such as `http://127.0.0.1:5173/tools/timeline` opens that tool, including after a refresh.
 
-On a Mac, double-click `Run App.command` in the project folder. It creates a virtualenv if needed, installs Python and frontend dependencies, and opens the app. Keep that window open while you use it, and press Control-C there to stop it. You can also start the two processes yourself:
+On a Mac, double-click `Sparkz Creator.app` or `Run App.command` in the project folder. The command creates a virtualenv if needed, installs Python and frontend dependencies, and opens the app. Keep that window open while you use it, and press Control-C there to stop it.
+
+Startup writes a line for each step, including the Python dependency check, which can sit for a while on a cold start before anything listens. `Sparkz Creator.app` keeps waiting while that log is still growing (up to 10 minutes) and only reports failure if the log goes quiet for a minute or the launcher exits. The log is `~/Library/Logs/Sparkz Creator.log`. Opening the app again while those servers are already up opens the existing app instead of stopping on a port conflict. A previous Sparkz Creator that is still holding the ports but not responding is stopped and started again. Another program on port 8000 or 5173 is left alone and named in the log.
+
+The app bundle is built from `macos/SparkzCreatorLauncher.swift`. Rebuild it after a launcher change:
+
+```bash
+mkdir -p "Sparkz Creator.app/Contents/MacOS" "Sparkz Creator.app/Contents/Resources"
+cp macos/Info.plist "Sparkz Creator.app/Contents/Info.plist"
+cp macos/SparkzCreator.icns "Sparkz Creator.app/Contents/Resources/SparkzCreator.icns"
+swiftc -O -framework AppKit \
+  -o "Sparkz Creator.app/Contents/MacOS/SparkzCreatorLauncher" \
+  macos/SparkzCreatorLauncher.swift
+chmod +x "Run App.command"
+```
+
+You can also start the two processes yourself:
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -108,7 +124,7 @@ python3 -m uvicorn web_app:app --host 127.0.0.1 --port 8000
 cd frontend && npm run dev
 ```
 
-ffmpeg is installed with the Python dependencies through `imageio-ffmpeg`, so a separate ffmpeg install is not required.
+ffmpeg is installed with the Python dependencies through `imageio-ffmpeg`, so a separate ffmpeg install is not required. Text Slideshow Reels prefers `FFMPEG_PATH` or `ffmpeg` on `PATH` when that build has libx264 and AAC, and otherwise uses the same bundled binary.
 
 To add another tool, append it to `frontend/src/tools.js` with a name, description, icon, route, and component. Home and the router both read that list. The component receives `{ onHome }` so it can return to Home.
 
@@ -125,3 +141,79 @@ Drop in photos (or choose several at once), drag or use the arrows to reorder th
 The text is centered horizontally and sits at the same vertical center as the 960×576 reference. It is drawn in TikTok Sans SemiBold at TikTok's yellow swatch `#F2CD46`, with no outline or shadow, and the size scales with the frame width so it covers the same share of the picture. TikTok's in-app Classic style is Proxima Nova Semibold, which is commercial and not bundled. TikTok Sans is the SIL Open Font License face in `fonts/TikTokSans/`.
 
 Music is optional. Leave the picker on Random to use a track from `music/` (trimmed to the video), choose No music, or upload a track. Put files in `music/` yourself if you already have them. Render, preview the MP4, and download it from `outputs/`. The default canvas is 1920×1080 at 24fps. Every photo is scaled to cover that frame and center-cropped, so portrait and landscape sources fill the picture with no black bars.
+
+### Text Slideshow
+
+Open Home → Text Slideshow, or go to `http://127.0.0.1:5173/tools/text-slideshow`.
+
+Each slide is 1080×1920, for a TikTok photo carousel or an Instagram Reel. A slide has a background photo (cover-cropped, no dimming) or a two-color gradient, any number of text boxes, and any number of image overlays.
+
+Text is TikTok Sans. The weight menu lists the files in `fonts/TikTokSans/` (Regular, Medium, SemiBold, Bold). **Add title** drops a box in the reference heading style: SemiBold, 53px, `#000000`, centered, 820px wide, starting at the measured vertical position. **Add body text** uses Medium at 43px with a line pitch of 51px, so a blank line in the text is the paragraph gap from the reference. **Add label** turns on the black rounded highlight (12px corners, white text, Medium 41px) used for the “se llama …” tag. Drag a box to move it. Drag the side handles to change the wrap width. Image overlays keep their aspect ratio unless you unlock it, and they default to a 16px corner radius like the reference screenshot. Bring forward and send back change the layer order.
+
+The on-screen preview is a PNG from the same Pillow renderer as the export, so what you see is what downloads. **Download PNGs** writes `01.png`, `02.png`, … into `outputs/<timestamp>_textslides/` and downloads a zip of those files. That export is unchanged.
+
+**Download Reel** uses those same frames to make `video.mp4` in that output folder and downloads it. The file is 1080×1920 H.264 (`yuv420p`, High profile, Rec. 709), 30fps, with AAC audio and the moov atom at the front, so Instagram Reels can play it. Each slide stays up for the seconds you set (default 2.75). Turn on **Hold the first slide longer** when the cover should sit a bit longer than the rest. The default join is a hard cut. Choose **Crossfade** for a short dissolve (default 0.35s, at most 1.5s, and always shorter than a slide). Add an audio file if you want music: a shorter track loops, a longer one is trimmed, and the end fades out over about half a second. Leave audio empty and the video still has a silent AAC track.
+
+**Music from URL** uses the same importer as the original music tab. Paste an Instagram reel or video URL, then **Fetch MP3**. The app downloads the video, converts the audio to MP3, and saves it in `music/` so you can reuse it. Turn on **Use Chrome login for restricted posts** when Instagram blocks anonymous access. **Saved tracks** lists everything already in `music/`, including MP3s fetched earlier. Pick one to preview it and to use it as this Reel's background. A file you add from disk is used instead of the saved-track pick. Either way the track is looped or trimmed to the video and fades out at the end.
+
+The demo deck is English placeholder copy in that measured layout, so you can try it before uploading photos.
+
+### Text Slideshow batch export
+
+The same renderer runs from the command line, for one deck or a folder of them:
+
+```bash
+python3 text_slideshow_video.py path/to/decks
+python3 text_slideshow_video.py path/to/one-deck --seconds 2.75 --first-seconds 4
+python3 text_slideshow_video.py path/to/one-deck --audio song.mp3 --fade 0.35
+python3 text_slideshow_video.py path/to/decks --audio-url "https://www.instagram.com/reel/XXXX/"
+python3 text_slideshow_video.py path/to/one-deck --audio-url "https://www.instagram.com/reel/XXXX/" --chrome-login
+```
+
+A deck is either:
+
+- a folder with `deck.json` (and the images it names), or
+- a folder of numbered PNG slides, such as `01.png`, `02.png`, from an earlier export.
+
+A directory of those decks is a batch. JSON decks write `output/video.mp4` plus the numbered PNGs. A folder that is already PNG slides gets `video.mp4` next to them. `--output` sets the mp4 path for a single deck.
+
+`deck.json` uses the same slide objects as the export API:
+
+```json
+{
+  "slides": [
+    {
+      "background_color": "#f4d5c4",
+      "background_color_2": "#d7e6f6",
+      "background_asset_id": null,
+      "elements": [
+        {
+          "type": "text",
+          "text": "how to be a better partner",
+          "x": 130,
+          "y": 352,
+          "width": 820,
+          "font_weight": "medium",
+          "font_size": 66,
+          "color": "#000000",
+          "align": "center",
+          "line_height": 1.186
+        }
+      ]
+    }
+  ],
+  "assets": {},
+  "seconds_per_slide": 2.75,
+  "first_slide_seconds": 4,
+  "crossfade_seconds": 0,
+  "audio": "song.mp3"
+}
+```
+
+`assets` maps an id used by `background_asset_id` or an image element to a path relative to the deck folder. If an id is omitted, the exporter also looks for `assets/<id>.png`. `audio` is optional and relative to the deck. Omit `first_slide_seconds` to hold every slide for the same length. `crossfade_seconds: 0` is a hard cut.
+
+`--audio-url` calls the same Instagram importer as **Music from URL** in the editor (`import_instagram_music`). It accepts an Instagram reel or video URL, writes an MP3 into `music/`, and uses that file for every deck in the batch. `--chrome-login` reads the Chrome login for a post Instagram will not serve anonymously. Pass `--audio` or `--audio-url`, not both. The saved track is still looped or trimmed to the video, with the same short fade out.
+
+`POST /api/text-slideshow/export-video` is the same render, as multipart form fields: `slides` (JSON), `seconds_per_slide`, `first_slide_seconds`, `crossfade_seconds`, and an optional `audio` file or `music_name` from `music/`. Fetching a URL is the existing `POST /api/music/import` (body: `url`, optional `use_browser_cookies`). The editor fetches first, then exports with the saved `music_name`. The response is the mp4. PNG export stays on `POST /api/text-slideshow/export`.
+
+ffmpeg is detected in this order: `FFMPEG_PATH`, then `ffmpeg` on `PATH`, then the binary bundled with `imageio-ffmpeg`. `python3 -m pip install -r requirements.txt` installs that bundle, which is also what `Run App.command` installs, so a separate ffmpeg install is optional. The binary needs libx264 and AAC. On a Mac, `brew install ffmpeg` is enough if you want the system one to win.

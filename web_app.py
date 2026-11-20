@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import shutil
@@ -18,10 +19,22 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from text_slideshow import (
+    MAX_SLIDES as TEXT_SLIDE_MAX_SLIDES,
+    export_text_slideshow,
+    open_slide_image,
+    slide_png_bytes,
+    style_payload as text_slideshow_style_payload,
+)
+from text_slideshow_video import (
+    DEFAULT_SLIDE_SECONDS,
+    VIDEO_FILENAME,
+    render_text_slideshow_video,
+)
 from slideshow import (
     DEFAULT_IMAGE_SECONDS,
     FONT_PATH as SLIDESHOW_FONT_PATH,
@@ -78,6 +91,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Output-Folder", "X-Video-Duration", "Content-Disposition"],
 )
 
 
@@ -123,6 +137,17 @@ class MusicDeleteRequest(BaseModel):
     music_name: str = Field(min_length=1)
 
 
+class TextSlideRequest(BaseModel):
+    background_asset_id: Optional[str] = None
+    background_color: str = "#d5e4f5"
+    background_color_2: Optional[str] = "#f7e7ef"
+    elements: list[dict] = Field(default_factory=list)
+
+
+class TextSlideshowExportRequest(BaseModel):
+    slides: list[TextSlideRequest]
+
+
 @dataclass
 class RenderJob:
     id: str
@@ -136,6 +161,9 @@ class RenderJob:
 
 jobs: dict[str, RenderJob] = {}
 jobs_lock = threading.Lock()
+
+TEXT_SLIDE_ASSET_DIR = ROOT / "tmp_textslide_assets"
+_ASSET_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 def validate_child_path(root: Path, child: Path) -> Path:
@@ -920,6 +948,184 @@ async def start_slideshow_render(
         "job": job_payload(jobs[job_id]),
         "plan": slideshow_plan(len(payloads), checked_duration),
     }
+
+
+def text_slide_asset_ids(slides: list[dict]) -> list[str]:
+    found: list[str] = []
+    for slide in slides:
+        background_id = slide.get("background_asset_id")
+        if background_id:
+            found.append(str(background_id))
+        for element in slide.get("elements") or []:
+            if element.get("type") == "image" and element.get("asset_id"):
+                found.append(str(element["asset_id"]))
+    return found
+
+
+def load_text_slide_assets(slides: list[dict]) -> dict[str, Path]:
+    assets: dict[str, Path] = {}
+    for asset_id in text_slide_asset_ids(slides):
+        if asset_id in assets:
+            continue
+        if not _ASSET_ID.match(asset_id):
+            raise ValueError("Unknown image.")
+        path = TEXT_SLIDE_ASSET_DIR / f"{asset_id}.png"
+        if not path.is_file():
+            raise ValueError("Unknown image.")
+        assets[asset_id] = path
+    return assets
+
+
+@app.get("/api/text-slideshow")
+def text_slideshow_defaults() -> dict[str, object]:
+    return text_slideshow_style_payload()
+
+
+@app.post("/api/text-slideshow/assets")
+async def upload_text_slide_asset(file: UploadFile = File(...)) -> dict[str, object]:
+    content = await file.read()
+    try:
+        image = open_slide_image(content)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    asset_id = uuid4().hex
+    TEXT_SLIDE_ASSET_DIR.mkdir(exist_ok=True)
+    path = TEXT_SLIDE_ASSET_DIR / f"{asset_id}.png"
+    image.save(path, format="PNG")
+    return {
+        "id": asset_id,
+        "width": image.width,
+        "height": image.height,
+        "url": f"/api/text-slideshow/assets/{asset_id}",
+    }
+
+
+@app.get("/api/text-slideshow/assets/{asset_id}")
+def text_slide_asset(asset_id: str) -> FileResponse:
+    if not _ASSET_ID.match(asset_id):
+        raise HTTPException(status_code=404, detail="Unknown image.")
+    path = TEXT_SLIDE_ASSET_DIR / f"{asset_id}.png"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Unknown image.")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.post("/api/text-slideshow/preview")
+def preview_text_slide(slide: TextSlideRequest) -> Response:
+    payload = slide.model_dump()
+    try:
+        png = slide_png_bytes(payload, load_text_slide_assets([payload]))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return Response(content=png, media_type="image/png")
+
+
+@app.post("/api/text-slideshow/export")
+def export_text_slides(request: TextSlideshowExportRequest) -> FileResponse:
+    if not request.slides:
+        raise HTTPException(status_code=400, detail="Add at least one slide.")
+    if len(request.slides) > TEXT_SLIDE_MAX_SLIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Use {TEXT_SLIDE_MAX_SLIDES} slides or fewer.",
+        )
+    slides = [slide.model_dump() for slide in request.slides]
+    try:
+        assets = load_text_slide_assets(slides)
+        folder, zip_path = export_text_slideshow(slides, assets)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=zip_path.name,
+        headers={"X-Output-Folder": folder.name},
+    )
+
+
+def _optional_form_seconds(value: str, label: str) -> float | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError as error:
+        raise ValueError(f"{label} must be a number.") from error
+
+
+@app.post("/api/text-slideshow/export-video")
+async def export_text_slideshow_video(
+    slides: str = Form(...),
+    seconds_per_slide: float = Form(DEFAULT_SLIDE_SECONDS),
+    first_slide_seconds: str = Form(""),
+    crossfade_seconds: float = Form(0.0),
+    music_name: str = Form(""),
+    audio: UploadFile | None = File(None),
+) -> FileResponse:
+    """Render the deck to video.mp4 in a new text-slideshow output folder."""
+    try:
+        payload = json.loads(slides)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=400, detail="Slides must be JSON.") from error
+    if not isinstance(payload, list) or not payload:
+        raise HTTPException(status_code=400, detail="Add at least one slide.")
+    if len(payload) > TEXT_SLIDE_MAX_SLIDES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Use {TEXT_SLIDE_MAX_SLIDES} slides or fewer.",
+        )
+
+    temp_audio: Path | None = None
+    try:
+        slide_models = [TextSlideRequest.model_validate(item).model_dump() for item in payload]
+        assets = load_text_slide_assets(slide_models)
+        first_hold = _optional_form_seconds(first_slide_seconds, "First slide duration")
+        audio_path: Path | None = None
+        if audio is not None and audio.filename:
+            content = await audio.read()
+            if not content:
+                raise ValueError("The audio file is empty.")
+            if len(content) > 100 * 1024 * 1024:
+                raise ValueError("Audio file is too large. Keep it under 100 MB.")
+            suffix = Path(audio.filename).suffix.lower()
+            if suffix not in AUDIO_EXTENSIONS:
+                allowed = ", ".join(sorted(AUDIO_EXTENSIONS))
+                raise ValueError(f"Audio file must use one of these extensions: {allowed}.")
+            handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            handle.write(content)
+            handle.close()
+            temp_audio = Path(handle.name)
+            try:
+                probe_duration(temp_audio)
+            except RuntimeError as error:
+                raise ValueError("That audio file could not be read.") from error
+            audio_path = temp_audio
+        elif music_name.strip():
+            audio_path = music_for_request(music_name.strip())
+
+        result = render_text_slideshow_video(
+            slide_models,
+            assets,
+            seconds_per_slide=seconds_per_slide,
+            first_slide_seconds=first_hold,
+            crossfade_seconds=crossfade_seconds,
+            audio_path=audio_path,
+        )
+    except (ValueError, RuntimeError, ValidationError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    finally:
+        if temp_audio is not None:
+            temp_audio.unlink(missing_ok=True)
+
+    return FileResponse(
+        result.path,
+        media_type="video/mp4",
+        filename=VIDEO_FILENAME,
+        headers={
+            "X-Output-Folder": result.output_dir.name,
+            "X-Video-Duration": f"{result.plan.duration:.3f}",
+        },
+    )
 
 
 @app.post("/api/render")
