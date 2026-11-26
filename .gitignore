@@ -17,3 +17,4 @@ music/*
 !music/.gitkeep
 videos/*
 !videos/.gitkeep
+uploads/

@@ -142,6 +142,16 @@ The text is centered horizontally and sits at the same vertical center as the 96
 
 Music is optional. Leave the picker on Random to use a track from `music/` (trimmed to the video), choose No music, or upload a track. Put files in `music/` yourself if you already have them. Render, preview the MP4, and download it from `outputs/`. The default canvas is 1920×1080 at 24fps. Every photo is scaled to cover that frame and center-cropped, so portrait and landscape sources fill the picture with no black bars.
 
+**End demo video** is optional. Upload an MP4 or MOV and it plays in full after the last photo, scaled to cover the same 1920×1080 frame. The hook text stays on the photo cuts only and disappears when the demo starts. The length is the photo count times the per-photo hold, plus the demo. The last demo you upload is stored in `uploads/demo/` and stays selected until you remove it, so the next renders can reuse it. **Keep demo video's own audio** is off by default. Leave it off and only the music track is heard; that track keeps playing under the demo and is trimmed, with a short fade, at the end. Turn it on to mix the demo's audio in during the demo. A demo file with no audio stream still renders.
+
+The same option is on the command line. Pass one folder of photos, or a folder of those folders. Each set can include `hook.txt` (or `text.txt`) for its own overlay. `--demo` is shared by every set:
+
+```bash
+python3 slideshow.py path/to/photos --text "hook line" --demo path/to/demo.mp4
+python3 slideshow.py path/to/batch --demo path/to/demo.mp4
+python3 slideshow.py path/to/one-set --demo path/to/demo.mp4 --keep-demo-audio --music song.mp3 --output out.mp4
+```
+
 ### Text Slideshow
 
 Open Home → Text Slideshow, or go to `http://127.0.0.1:5173/tools/text-slideshow`.

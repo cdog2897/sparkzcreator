@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowUp,
   Download,
+  Film,
   ImagePlus,
   Images,
   Loader2,
@@ -78,12 +79,16 @@ export default function Slideshow({ onHome }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
   const [isUploadingMusic, setIsUploadingMusic] = useState(false);
+  const [demo, setDemo] = useState(null);
+  const [keepDemoAudio, setKeepDemoAudio] = useState(false);
+  const [isUploadingDemo, setIsUploadingDemo] = useState(false);
   const [job, setJob] = useState(null);
   const [error, setError] = useState('');
   const [showRender, setShowRender] = useState(false);
   const [dragId, setDragId] = useState('');
   const fileInputRef = useRef(null);
   const musicInputRef = useRef(null);
+  const demoInputRef = useRef(null);
   const phoneRef = useRef(null);
   const captionRef = useRef(null);
   const [phoneWidth, setPhoneWidth] = useState(360);
@@ -91,7 +96,9 @@ export default function Slideshow({ onHome }) {
   const fps = settings?.fps || 24;
   const framesPerImage = slideFrameCount(duration, fps);
   const slideSeconds = framesPerImage / fps;
-  const totalSeconds = images.length * slideSeconds;
+  const cutSeconds = images.length * slideSeconds;
+  const demoSeconds = demo ? slideFrameCount(demo.durationSeconds, fps) / fps : 0;
+  const totalSeconds = cutSeconds + demoSeconds;
   const referenceWidth = settings?.referenceWidth || 960;
   const referenceFontSize = settings?.fontSizeAtReference || 35;
   const lineHeight = (settings?.lineTopDeltaAtReference || 42) / referenceFontSize;
@@ -105,6 +112,7 @@ export default function Slideshow({ onHome }) {
         if (!mounted) return;
         setSettings(slideshow);
         setDuration(String(slideshow.defaultImageDuration));
+        setDemo(slideshow.demo || null);
         setTracks(music.music || []);
       })
       .catch((caught) => {
@@ -254,6 +262,42 @@ export default function Slideshow({ onHome }) {
     }
   }
 
+  async function uploadDemo(file) {
+    if (!file) return;
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    if (!['mp4', 'mov'].includes(extension || '')) {
+      setError('End demo video must be an MP4 or MOV file.');
+      return;
+    }
+    setIsUploadingDemo(true);
+    setError('');
+    try {
+      const body = new FormData();
+      body.append('demo', file, file.name);
+      const response = await fetch('/api/slideshow/demo', { method: 'POST', body });
+      if (!response.ok) throw new Error(await readError(response));
+      const payload = await response.json();
+      setDemo(payload.demo);
+      setShowRender(false);
+    } catch (caught) {
+      setError(caught.message);
+    } finally {
+      setIsUploadingDemo(false);
+    }
+  }
+
+  async function removeDemo() {
+    setError('');
+    try {
+      const response = await fetch('/api/slideshow/demo', { method: 'DELETE' });
+      if (!response.ok) throw new Error(await readError(response));
+      setDemo(null);
+      setKeepDemoAudio(false);
+    } catch (caught) {
+      setError(caught.message);
+    }
+  }
+
   async function renderVideo() {
     if (!images.length || isRendering) return;
     const requested = Number(duration);
@@ -270,6 +314,10 @@ export default function Slideshow({ onHome }) {
     body.append('text', text);
     body.append('image_duration', String(requested));
     body.append('music_name', musicName || 'random');
+    if (demo) {
+      body.append('use_demo', 'true');
+      body.append('keep_demo_audio', keepDemoAudio ? 'true' : 'false');
+    }
     try {
       const response = await fetch('/api/slideshow/render', { method: 'POST', body });
       if (!response.ok) throw new Error(await readError(response));
@@ -428,7 +476,89 @@ export default function Slideshow({ onHome }) {
             </label>
             <p className="slideshow-hint">
               {framesPerImage} frames at {fps} fps · {formatSeconds(slideSeconds)} per photo
-              {images.length ? ` · ${formatSeconds(totalSeconds)} total` : ''}
+              {images.length || demo
+                ? ` · ${formatSeconds(totalSeconds)} total${
+                  demo
+                    ? ` (${formatSeconds(cutSeconds)} photos + ${formatSeconds(demoSeconds)} demo)`
+                    : ''
+                }`
+                : ''}
+            </p>
+          </div>
+
+          <div className="slideshow-section">
+            <div className="slideshow-heading">
+              <Film size={16} />
+              <div>
+                <h2>End demo video</h2>
+                <span>Optional. Plays in full after the last cut. The hook text stops when it starts.</span>
+              </div>
+            </div>
+            {demo ? (
+              <div className="slideshow-demo">
+                <video controls playsInline preload="metadata" src={demo.url} />
+                <div className="slideshow-demo-meta">
+                  <strong title={demo.name}>{demo.name}</strong>
+                  <span>
+                    {formatSeconds(demoSeconds)}
+                    {demo.hasAudio ? ' · has audio' : ' · no audio'}
+                  </span>
+                  <div className="slideshow-demo-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={isUploadingDemo}
+                      onClick={() => demoInputRef.current?.click()}
+                      type="button"
+                    >
+                      {isUploadingDemo ? <Loader2 className="spin" size={14} /> : <Upload size={14} />}
+                      Replace
+                    </button>
+                    <button className="secondary-button" onClick={removeDemo} type="button">
+                      <X size={14} />
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <button
+                className="slideshow-dropzone"
+                disabled={isUploadingDemo}
+                onClick={() => demoInputRef.current?.click()}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  uploadDemo(event.dataTransfer.files?.[0]);
+                }}
+                type="button"
+              >
+                {isUploadingDemo ? <Loader2 className="spin" size={16} /> : <Upload size={16} />}
+                Drop an MP4 or MOV, or click to choose
+              </button>
+            )}
+            <input
+              accept="video/mp4,video/quicktime,.mp4,.mov"
+              hidden
+              onChange={(event) => {
+                uploadDemo(event.target.files?.[0]);
+                event.target.value = '';
+              }}
+              ref={demoInputRef}
+              type="file"
+            />
+            <label className="slideshow-check">
+              <input
+                checked={keepDemoAudio}
+                disabled={!demo}
+                onChange={(event) => setKeepDemoAudio(event.target.checked)}
+                type="checkbox"
+              />
+              Keep demo video&apos;s own audio
+            </label>
+            <p className="slideshow-hint">
+              {demo && images.length
+                ? `${images.length} × ${formatSeconds(slideSeconds)} + ${formatSeconds(demoSeconds)} demo = ${formatSeconds(totalSeconds)}`
+                : 'Off by default. The last demo stays selected for the next render until you remove it. Music, when you pick a track, keeps playing under the demo and ends with the video.'}
             </p>
           </div>
 
@@ -437,7 +567,11 @@ export default function Slideshow({ onHome }) {
               <Music2 size={16} />
               <div>
                 <h2>Music</h2>
-                <span>Trimmed to the video. Random uses a track from music/.</span>
+                <span>
+                  {demo
+                    ? 'Plays under the photos and the demo, then trims at the end.'
+                    : 'Trimmed to the video. Random uses a track from music/.'}
+                </span>
               </div>
             </div>
             <div className="slideshow-music-row">

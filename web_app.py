@@ -37,7 +37,9 @@ from text_slideshow_video import (
 )
 from slideshow import (
     DEFAULT_IMAGE_SECONDS,
+    DEMO_EXTENSIONS,
     FONT_PATH as SLIDESHOW_FONT_PATH,
+    MAX_DEMO_BYTES,
     MAX_IMAGE_SECONDS,
     MAX_IMAGES,
     MAX_TEXT_CHARS,
@@ -50,6 +52,7 @@ from slideshow import (
     SLIDESHOW_HEIGHT,
     SLIDESHOW_WIDTH,
     TEXT_COLOR_HEX,
+    inspect_demo_video,
     render_slideshow,
     slideshow_plan,
     validate_image_payloads,
@@ -163,6 +166,7 @@ jobs: dict[str, RenderJob] = {}
 jobs_lock = threading.Lock()
 
 TEXT_SLIDE_ASSET_DIR = ROOT / "tmp_textslide_assets"
+DEMO_DIR = ROOT / "uploads" / "demo"
 _ASSET_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -849,12 +853,100 @@ def slideshow_music_path(music_name: str) -> Path | None:
     return music_for_request(cleaned)
 
 
+def saved_demo_path() -> Path | None:
+    if not DEMO_DIR.is_dir():
+        return None
+    matches = [
+        path
+        for path in DEMO_DIR.iterdir()
+        if path.is_file()
+        and not path.name.startswith(".")
+        and path.suffix.lower() in DEMO_EXTENSIONS
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def demo_public_payload() -> dict[str, object] | None:
+    path = saved_demo_path()
+    if path is None:
+        return None
+    meta_path = DEMO_DIR / "meta.json"
+    meta: dict[str, object] = {}
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = None
+        if isinstance(loaded, dict):
+            meta = loaded
+    duration = meta.get("durationSeconds")
+    has_audio = meta.get("hasAudio")
+    if not isinstance(duration, (int, float)) or not isinstance(has_audio, bool):
+        info = inspect_demo_video(path)
+        duration = info.duration
+        has_audio = info.has_audio
+    return {
+        "name": str(meta.get("name") or path.name),
+        "url": f"/api/media/slideshow-demo?v={int(path.stat().st_mtime)}",
+        "durationSeconds": float(duration),
+        "hasAudio": bool(has_audio),
+    }
+
+
+def save_demo_upload(filename: str, content: bytes) -> dict[str, object]:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in DEMO_EXTENSIONS:
+        raise ValueError("End demo video must be an .mp4 or .mov file.")
+    if not content:
+        raise ValueError("Choose a demo video to upload.")
+    if len(content) > MAX_DEMO_BYTES:
+        raise ValueError("Demo video must be under 200 MB.")
+
+    DEMO_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = DEMO_DIR / f".incoming-{uuid4().hex}{suffix}"
+    temporary.write_bytes(content)
+    try:
+        info = inspect_demo_video(temporary)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    destination = DEMO_DIR / f"end-demo{suffix}"
+    for old in list(DEMO_DIR.iterdir()):
+        if old == temporary or not old.is_file():
+            continue
+        if old.suffix.lower() in DEMO_EXTENSIONS or old.name == "meta.json":
+            old.unlink()
+    temporary.replace(destination)
+    meta = {
+        "name": Path(filename).name or destination.name,
+        "durationSeconds": info.duration,
+        "hasAudio": info.has_audio,
+    }
+    (DEMO_DIR / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    payload = demo_public_payload()
+    if payload is None:
+        raise ValueError("Could not store the demo video.")
+    return payload
+
+
+def clear_saved_demo() -> None:
+    if not DEMO_DIR.is_dir():
+        return
+    for path in DEMO_DIR.iterdir():
+        if path.is_file():
+            path.unlink()
+
+
 def run_slideshow_job(
     job_id: str,
     image_payloads: list[bytes],
     text: str,
     image_seconds: float,
     music_path: Path | None,
+    demo_path: Path | None = None,
+    keep_demo_audio: bool = False,
 ) -> None:
     set_job_status(job_id, "running")
     temp_dir = Path(tempfile.mkdtemp(dir=ROOT))
@@ -870,6 +962,8 @@ def run_slideshow_job(
             text=text,
             image_seconds=image_seconds,
             music_path=music_path,
+            demo_path=demo_path,
+            keep_demo_audio=keep_demo_audio,
             progress_callback=lambda message: append_job_log(job_id, message),
         )
         output_url = f"/api/media/output?{urlencode({'output_name': output_path.name})}"
@@ -903,7 +997,50 @@ def slideshow_defaults() -> dict[str, object]:
         "fontSizeAtReference": REFERENCE_FONT_SIZE,
         "lineSpacingAtReference": REFERENCE_LINE_SPACING,
         "lineTopDeltaAtReference": REFERENCE_LINE_TOP_DELTA,
+        "demo": demo_public_payload(),
     }
+
+
+@app.post("/api/slideshow/demo")
+async def upload_slideshow_demo(demo: UploadFile = File(...)) -> dict[str, object]:
+    try:
+        payload = save_demo_upload(demo.filename or "", await demo.read())
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"demo": payload}
+
+
+@app.delete("/api/slideshow/demo")
+def delete_slideshow_demo() -> dict[str, object]:
+    clear_saved_demo()
+    return {"demo": None}
+
+
+async def _demo_for_render(use_demo: bool, upload: UploadFile | None) -> Path | None:
+    if upload is not None and (upload.filename or ""):
+        content = await upload.read()
+        if content:
+            try:
+                save_demo_upload(upload.filename or "", content)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            path = saved_demo_path()
+            if path is None:
+                raise HTTPException(status_code=400, detail="Could not store the demo video.")
+            return path
+    if not use_demo:
+        return None
+    path = saved_demo_path()
+    if path is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload an end demo video first, or remove it.",
+        )
+    try:
+        inspect_demo_video(path)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return path
 
 
 @app.post("/api/slideshow/render")
@@ -912,6 +1049,9 @@ async def start_slideshow_render(
     text: str = Form(""),
     image_duration: float = Form(DEFAULT_IMAGE_SECONDS),
     music_name: str = Form("random"),
+    use_demo: bool = Form(False),
+    keep_demo_audio: bool = Form(False),
+    demo: UploadFile | None = File(None),
 ) -> dict[str, object]:
     if not images:
         raise HTTPException(status_code=400, detail="Add at least one image.")
@@ -934,19 +1074,37 @@ async def start_slideshow_render(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+    demo_path = await _demo_for_render(use_demo, demo)
+    plan = slideshow_plan(len(payloads), checked_duration)
+    if demo_path is not None:
+        demo_info = inspect_demo_video(demo_path)
+        plan = {
+            **plan,
+            "demoSeconds": demo_info.play_seconds,
+            "durationSeconds": float(plan["durationSeconds"]) + demo_info.play_seconds,
+        }
+
     job_id = uuid4().hex
     with jobs_lock:
         jobs[job_id] = RenderJob(id=job_id)
 
     thread = threading.Thread(
         target=run_slideshow_job,
-        args=(job_id, payloads, text, checked_duration, music_path),
+        args=(
+            job_id,
+            payloads,
+            text,
+            checked_duration,
+            music_path,
+            demo_path,
+            keep_demo_audio and demo_path is not None,
+        ),
         daemon=True,
     )
     thread.start()
     return {
         "job": job_payload(jobs[job_id]),
-        "plan": slideshow_plan(len(payloads), checked_duration),
+        "plan": plan,
     }
 
 
@@ -1178,6 +1336,17 @@ def clip_media(
 @app.get("/api/media/music")
 def music_media(music_name: str = Query(..., min_length=1)) -> FileResponse:
     return FileResponse(music_for_request(music_name))
+
+
+@app.get("/api/media/slideshow-demo")
+def slideshow_demo_media() -> FileResponse:
+    path = saved_demo_path()
+    if path is None:
+        raise HTTPException(status_code=404, detail="No end demo video is saved.")
+    media_type = "video/quicktime" if path.suffix.lower() == ".mov" else "video/mp4"
+    payload = demo_public_payload()
+    filename = str(payload["name"]) if payload else path.name
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @app.get("/api/media/slideshow-font")

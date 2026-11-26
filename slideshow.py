@@ -5,6 +5,8 @@ Timing and text layout are measured from the reference TikTok screen
 recording (960x576, 24fps). The default canvas is 1920x1080, the same
 16:9 frame at twice the reference size. Photos cover that frame and are
 center-cropped. The photos are stills: hard cuts, no zoom.
+An optional demo video can play after the last photo. The hook text is
+drawn on the photos only, so it is gone when the demo starts.
 Each photo holds for 10 frames at 24fps, which is 0.417 seconds. Twenty
 photos end at 8.333 seconds, the hard cut into the TikTok end card.
 The yellow is TikTok's in-app yellow swatch, #F2CD46.
@@ -12,13 +14,16 @@ The yellow is TikTok's in-app yellow swatch, #F2CD46.
 
 from __future__ import annotations
 
+import argparse
 import io
 import math
+import re
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from PIL import Image, ImageFont, ImageOps, UnidentifiedImageError
 
@@ -28,6 +33,8 @@ from generate_video import (
     SDR_COLOR_PARAMS,
     STRIP_AMBIENT_SIDE_DATA,
     ffmpeg_exe,
+    natural_sort_key,
+    parse_duration_from_ffmpeg,
 )
 
 
@@ -60,7 +67,20 @@ TEXT_COLOR_HEX = "#F2CD46"
 FONT_PATH = ROOT / "fonts" / "TikTokSans" / "TikTokSans-SemiBold.ttf"
 FONT_LABEL = "TikTok Sans SemiBold"
 
+# Optional clip played after the last photo. The hook text is drawn on the
+# photos only, then this clip is concatenated at the same size, fps, and
+# pixel format.
+DEMO_EXTENSIONS = {".mp4", ".mov"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+MAX_DEMO_BYTES = 200 * 1024 * 1024
+MAX_DEMO_SECONDS = 10 * 60
+AUDIO_FADE_SECONDS = 0.25
+HOOK_FILENAMES = ("hook.txt", "text.txt")
+
 ProgressCallback = Callable[[str], None]
+_STREAM_KIND = re.compile(
+    r"Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]*\))?:\s*(Video|Audio):"
+)
 
 
 def slide_frame_count(duration_seconds: float, fps: int = SLIDESHOW_FPS) -> int:
@@ -109,6 +129,11 @@ def slideshow_plan(
         "slideSeconds": slide_seconds,
         "durationSeconds": image_count * slide_seconds,
     }
+
+
+def demo_play_seconds(duration_seconds: float, fps: int = SLIDESHOW_FPS) -> float:
+    """Frame-snapped length of a demo clip at the slideshow frame rate."""
+    return slide_frame_count(duration_seconds, fps) / fps
 
 
 def validate_image_seconds(duration_seconds: float) -> float:
@@ -229,6 +254,131 @@ def run_slideshow_ffmpeg(command: list[str]) -> None:
         raise RuntimeError(tail or f"ffmpeg exited with status {completed.returncode}.")
 
 
+def _probe_stderr(path: Path) -> str:
+    completed = subprocess.run(
+        [ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stderr or ""
+
+
+def probe_stream_kinds(path: Path) -> tuple[bool, bool]:
+    """Return (has_video, has_audio) from ffmpeg's stream listing."""
+    kinds = set(_STREAM_KIND.findall(_probe_stderr(path)))
+    return "Video" in kinds, "Audio" in kinds
+
+
+class DemoVideo:
+    """A demo clip normalized to the slideshow frame rate."""
+
+    def __init__(self, path: Path, duration: float, frames: int, has_audio: bool, fps: int) -> None:
+        self.path = path
+        self.duration = duration
+        self.frames = frames
+        self.has_audio = has_audio
+        self.fps = fps
+
+    @property
+    def play_seconds(self) -> float:
+        return self.frames / self.fps
+
+
+def inspect_demo_video(path: Path, fps: int = SLIDESHOW_FPS) -> DemoVideo:
+    """Reject anything that is not a short mp4 or mov with a video stream."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing demo video: {path}")
+    if path.suffix.lower() not in DEMO_EXTENSIONS:
+        raise ValueError("End demo video must be an .mp4 or .mov file.")
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError("Demo video is empty.")
+    if size > MAX_DEMO_BYTES:
+        raise ValueError("Demo video must be under 200 MB.")
+    if fps <= 0:
+        raise ValueError("Frame rate must be positive.")
+
+    stderr = _probe_stderr(path)
+    kinds = set(_STREAM_KIND.findall(stderr))
+    if "Video" not in kinds:
+        raise ValueError("End demo file has no video stream.")
+    try:
+        duration = parse_duration_from_ffmpeg(stderr, path)
+    except RuntimeError as error:
+        raise ValueError("Could not read the demo video.") from error
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("Demo video has no duration.")
+    if duration > MAX_DEMO_SECONDS:
+        raise ValueError("Demo video must be 10 minutes or shorter.")
+    return DemoVideo(
+        path=path,
+        duration=duration,
+        frames=slide_frame_count(duration, fps),
+        has_audio="Audio" in kinds,
+        fps=fps,
+    )
+
+
+def _audio_fade_suffix(total_seconds: float) -> str:
+    fade = min(AUDIO_FADE_SECONDS, total_seconds * 0.25)
+    if fade < 0.02:
+        return ""
+    start = max(0.0, total_seconds - fade)
+    return f",afade=t=out:st={start:.6f}:d={fade:.6f}"
+
+
+_STEREO = "aformat=sample_rates=44100:channel_layouts=stereo,"
+
+
+def demo_audio_filters(
+    *,
+    music_index: int | None,
+    demo_index: int,
+    demo_has_audio: bool,
+    keep_demo_audio: bool,
+    photo_seconds: float,
+    demo_seconds: float,
+    total_seconds: float,
+) -> list[str]:
+    """Build filters that end in [aout].
+
+    An empty list means the output should stay silent. Music, when present,
+    runs for the whole video and fades at the end. Demo audio, when requested
+    and actually present, is delayed until the demo starts and mixed under it.
+    """
+    mix_demo = keep_demo_audio and demo_has_audio
+    if music_index is None and not mix_demo:
+        return []
+
+    fade = _audio_fade_suffix(total_seconds)
+    filters: list[str] = []
+    if music_index is not None:
+        filters.append(
+            f"[{music_index}:a:0]{_STEREO}"
+            f"atrim=0:{total_seconds:.6f},asetpts=PTS-STARTPTS,"
+            f"apad=whole_dur={total_seconds:.6f}[music]"
+        )
+    if mix_demo:
+        delay_ms = max(0, int(round(photo_seconds * 1000)))
+        filters.append(
+            f"[{demo_index}:a:0]{_STEREO}"
+            f"atrim=0:{demo_seconds:.6f},asetpts=PTS-STARTPTS,"
+            f"apad=whole_dur={demo_seconds:.6f},"
+            f"adelay={delay_ms}|{delay_ms}[demoaudio]"
+        )
+    if music_index is not None and mix_demo:
+        filters.append(
+            "[music][demoaudio]amix=inputs=2:duration=longest:"
+            f"dropout_transition=0:normalize=0{fade}[aout]"
+        )
+    elif music_index is not None:
+        filters.append(f"[music]anull{fade}[aout]")
+    else:
+        filters.append(f"[demoaudio]anull{fade}[aout]")
+    return filters
+
+
 def render_slideshow(
     image_paths: list[Path],
     text: str = "",
@@ -239,8 +389,16 @@ def render_slideshow(
     fps: int = SLIDESHOW_FPS,
     output_path: Path | None = None,
     progress_callback: ProgressCallback | None = None,
+    demo_path: Path | None = None,
+    keep_demo_audio: bool = False,
+    preset: str = "medium",
 ) -> Path:
-    """Render a hard-cut slideshow. Video length is images × frame-snapped duration."""
+    """Render a hard-cut slideshow. Video length is images × frame-snapped duration.
+
+    An optional demo plays after the last photo, at the same size and frame
+    rate. Hook text is burned into the photos before that join, so it is gone
+    as soon as the demo starts.
+    """
     if not image_paths:
         raise ValueError("Add at least one image.")
     if len(image_paths) > MAX_IMAGES:
@@ -253,7 +411,12 @@ def render_slideshow(
     image_seconds = validate_image_seconds(image_seconds)
     frames = slide_frame_count(image_seconds, fps)
     slide_seconds = frames / fps
-    duration = len(image_paths) * slide_seconds
+    photo_seconds = len(image_paths) * slide_seconds
+    demo: DemoVideo | None = None
+    if demo_path is not None:
+        demo = inspect_demo_video(demo_path, fps)
+    demo_seconds = demo.play_seconds if demo is not None else 0.0
+    duration = photo_seconds + demo_seconds
     overlay = text.replace("\r\n", "\n").replace("\r", "\n")
     if len(overlay) > MAX_TEXT_CHARS:
         raise ValueError(f"Text must be {MAX_TEXT_CHARS} characters or fewer.")
@@ -276,6 +439,14 @@ def render_slideshow(
         emit(f"Music: {music_path.name}")
     else:
         emit("Music: none")
+    if demo is not None:
+        emit(f"Demo: {demo.path.name} ({demo.play_seconds:.3f}s after the photos)")
+        if keep_demo_audio and demo.has_audio:
+            emit("Demo audio: mixed in during the demo")
+        elif keep_demo_audio:
+            emit("Demo audio: requested, but this file has no audio stream")
+        else:
+            emit("Demo audio: off")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     if output_path is None:
@@ -315,9 +486,15 @@ def render_slideshow(
                     str(image_path),
                 ]
             )
+        next_input = len(normalized)
+        demo_index: int | None = None
+        if demo is not None:
+            demo_index = next_input
+            next_input += 1
+            command.extend(["-i", str(demo.path)])
         music_index: int | None = None
         if music_path is not None:
-            music_index = len(normalized)
+            music_index = next_input
             command.extend(["-i", str(music_path)])
 
         text_x, text_y = text_draw_position()
@@ -347,9 +524,36 @@ def render_slideshow(
             current = "with_text"
         else:
             current = "base"
-        filters.append(
-            f"[{current}]{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},format=yuv420p[vout]"
-        )
+        # Text is already burned into the photos. A demo is appended after
+        # that, so the hook is gone the moment the demo starts.
+        if demo is None:
+            filters.append(
+                f"[{current}]{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},format=yuv420p[vout]"
+            )
+            audio_filters: list[str] = []
+        else:
+            filters.append(
+                f"[{current}]{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},"
+                f"format=yuv420p,settb=1/{fps}[photos]"
+            )
+            filters.append(
+                f"[{demo_index}:v]{cover_crop_filter(width, height)},"
+                f"fps={fps},format=yuv420p,{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},"
+                f"trim=end_frame={demo.frames},setpts=PTS-STARTPTS,settb=1/{fps}[demov]"
+            )
+            filters.append(
+                f"[photos][demov]concat=n=2:v=1:a=0,format=yuv420p[vout]"
+            )
+            audio_filters = demo_audio_filters(
+                music_index=music_index,
+                demo_index=demo_index if demo_index is not None else 0,
+                demo_has_audio=demo.has_audio,
+                keep_demo_audio=keep_demo_audio,
+                photo_seconds=photo_seconds,
+                demo_seconds=demo.play_seconds,
+                total_seconds=duration,
+            )
+        filters.extend(audio_filters)
 
         command.extend(
             [
@@ -368,7 +572,7 @@ def render_slideshow(
                 "-c:v",
                 "libx264",
                 "-preset",
-                "medium",
+                preset,
                 "-crf",
                 "20",
                 "-pix_fmt",
@@ -383,7 +587,24 @@ def render_slideshow(
                 "handler_name=VideoHandler",
             ]
         )
-        if music_index is not None:
+        if audio_filters:
+            command.extend(
+                [
+                    "-map",
+                    "[aout]",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    "44100",
+                    "-ac",
+                    "2",
+                    "-metadata:s:a:0",
+                    "handler_name=SoundHandler",
+                ]
+            )
+        elif music_index is not None:
             command.extend(
                 [
                     "-map",
@@ -407,3 +628,191 @@ def render_slideshow(
         run_slideshow_ffmpeg(command)
 
     return output_path
+
+
+def slideshow_images(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    paths = [
+        path
+        for path in folder.iterdir()
+        if path.is_file()
+        and not path.name.startswith(".")
+        and path.suffix.lower() in IMAGE_EXTENSIONS
+    ]
+    return sorted(paths, key=natural_sort_key)
+
+
+def slideshow_image_sets(path: Path) -> list[Path]:
+    """One folder of photos, or a folder whose children are those folders."""
+    if not path.exists():
+        raise ValueError(f"Nothing at {path}.")
+    if not path.is_dir():
+        raise ValueError(f"{path} is not a folder of photos.")
+    if slideshow_images(path):
+        return [path]
+    children = [
+        child
+        for child in sorted(path.iterdir(), key=natural_sort_key)
+        if child.is_dir() and slideshow_images(child)
+    ]
+    if not children:
+        raise ValueError(
+            f"No photos in {path}. Add images, or a folder of image folders."
+        )
+    return children
+
+
+def read_hook_text(folder: Path, fallback: str) -> str:
+    """Per-set overlay. hook.txt or text.txt wins over the shared fallback."""
+    for name in HOOK_FILENAMES:
+        candidate = folder / name
+        if candidate.is_file():
+            return (
+                candidate.read_text(encoding="utf-8")
+                .replace("\r\n", "\n")
+                .replace("\r", "\n")
+                .rstrip("\n")
+            )
+    return fallback
+
+
+def render_fast_cuts(
+    path: Path,
+    *,
+    text: str = "",
+    demo_path: Path | None = None,
+    keep_demo_audio: bool = False,
+    music_path: Path | None = None,
+    image_seconds: float = DEFAULT_IMAGE_SECONDS,
+    output_path: Path | None = None,
+    output_dir: Path | None = None,
+    width: int = SLIDESHOW_WIDTH,
+    height: int = SLIDESHOW_HEIGHT,
+    preset: str = "medium",
+) -> list[Path]:
+    """Render one photo folder, or every photo folder inside a batch folder.
+
+    The same demo, when given, is appended to every set. Each set can carry
+    its own hook in hook.txt or text.txt.
+    """
+    sets = slideshow_image_sets(path)
+    if output_path is not None and len(sets) != 1:
+        raise ValueError("--output applies to a single folder of photos, not a batch.")
+    if demo_path is not None:
+        inspect_demo_video(demo_path)
+    if music_path is not None and not music_path.is_file():
+        raise FileNotFoundError(f"Missing music file: {music_path}")
+
+    rendered: list[Path] = []
+    for folder in sets:
+        images = slideshow_images(folder)
+        hook = read_hook_text(folder, text)
+        if output_path is not None:
+            destination: Path | None = output_path
+        elif len(sets) > 1 or output_dir is not None:
+            directory = output_dir or (OUTPUT_DIR / "fastcut")
+            directory.mkdir(parents=True, exist_ok=True)
+            destination = directory / f"{folder.name}.mp4"
+        else:
+            destination = None
+        rendered.append(
+            render_slideshow(
+                images,
+                text=hook,
+                image_seconds=image_seconds,
+                music_path=music_path,
+                width=width,
+                height=height,
+                output_path=destination,
+                demo_path=demo_path,
+                keep_demo_audio=keep_demo_audio,
+                preset=preset,
+            )
+        )
+    return rendered
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="slideshow.py",
+        description=(
+            "Render Fast Cut slideshows. Pass one folder of photos, or a folder "
+            "of those folders, to end every cut in the same demo video."
+        ),
+    )
+    parser.add_argument(
+        "path",
+        type=Path,
+        help="A folder of photos, or a folder of photo folders.",
+    )
+    parser.add_argument(
+        "--text",
+        default="",
+        help="Hook text. hook.txt or text.txt inside a set overrides this.",
+    )
+    parser.add_argument(
+        "--demo",
+        type=Path,
+        default=None,
+        help="Optional mp4 or mov played in full after the last photo cut.",
+    )
+    parser.add_argument(
+        "--keep-demo-audio",
+        action="store_true",
+        help="Mix the demo file's own audio in during the demo. Default is off.",
+    )
+    parser.add_argument(
+        "--music",
+        type=Path,
+        default=None,
+        help="Optional music file. It plays under the photos and the demo, then ends with the video.",
+    )
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        default=DEFAULT_IMAGE_SECONDS,
+        help=f"Seconds per photo before frame snapping (default {DEFAULT_IMAGE_SECONDS}).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="MP4 path for a single photo folder.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for a batch. One mp4 per photo folder. Default is outputs/fastcut/.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.keep_demo_audio and args.demo is None:
+            raise ValueError("--keep-demo-audio needs --demo.")
+        results = render_fast_cuts(
+            args.path,
+            text=args.text,
+            demo_path=args.demo,
+            keep_demo_audio=args.keep_demo_audio,
+            music_path=args.music,
+            image_seconds=args.seconds,
+            output_path=args.output,
+            output_dir=args.output_dir,
+        )
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f"Could not render: {error}", file=sys.stderr)
+        return 1
+
+    for path in results:
+        print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
