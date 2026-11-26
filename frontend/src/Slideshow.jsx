@@ -68,11 +68,20 @@ function newImageId() {
   return `photo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+const OUTPUT_WIDTH = 1080;
+const OUTPUT_HEIGHT = 1920;
+const PHOTO_FORMATS = [
+  { id: '16:9', width: 1080, height: 608 },
+  { id: '1:1', width: 1080, height: 1080 },
+  { id: '9:16', width: 1080, height: 1920 },
+];
+
 export default function Slideshow({ onHome }) {
   const [settings, setSettings] = useState(null);
   const [images, setImages] = useState([]);
   const [text, setText] = useState('oh to travel the world\nwith the love of my life');
   const [duration, setDuration] = useState('0.417');
+  const [photoFormat, setPhotoFormat] = useState('16:9');
   const [musicName, setMusicName] = useState('random');
   const [tracks, setTracks] = useState([]);
   const [previewIndex, setPreviewIndex] = useState(0);
@@ -104,6 +113,11 @@ export default function Slideshow({ onHome }) {
   const lineHeight = (settings?.lineTopDeltaAtReference || 42) / referenceFontSize;
   const textColor = settings?.textColor || '#F2CD46';
   const selectedTrack = tracks.find((track) => track.name === musicName) || null;
+  const formats = settings?.photoFormats?.length ? settings.photoFormats : PHOTO_FORMATS;
+  const selectedFormat = formats.find((item) => item.id === photoFormat) || formats[0];
+  const outputWidth = settings?.width || OUTPUT_WIDTH;
+  const outputHeight = settings?.height || OUTPUT_HEIGHT;
+  const photoHeight = selectedFormat?.height || 608;
 
   useEffect(() => {
     let mounted = true;
@@ -112,6 +126,7 @@ export default function Slideshow({ onHome }) {
         if (!mounted) return;
         setSettings(slideshow);
         setDuration(String(slideshow.defaultImageDuration));
+        setPhotoFormat(slideshow.photoFormat || '16:9');
         setDemo(slideshow.demo || null);
         setTracks(music.music || []);
       })
@@ -313,6 +328,7 @@ export default function Slideshow({ onHome }) {
     images.forEach((image) => body.append('images', image.file, image.name));
     body.append('text', text);
     body.append('image_duration', String(requested));
+    body.append('photo_format', photoFormat);
     body.append('music_name', musicName || 'random');
     if (demo) {
       body.append('use_demo', 'true');
@@ -345,7 +361,7 @@ export default function Slideshow({ onHome }) {
         <div className="topbar-metrics" aria-label="slideshow timing">
           <span>{images.length} photos</span>
           <span>{formatSeconds(totalSeconds)}</span>
-          <span>{settings ? `${settings.width}×${settings.height}` : '1920×1080'}</span>
+          <span>{outputWidth}×{outputHeight}</span>
         </div>
       </header>
 
@@ -358,7 +374,7 @@ export default function Slideshow({ onHome }) {
               <ImagePlus size={16} />
               <div>
                 <h2>Photos</h2>
-                <span>Order is the cut order. Each photo is full-bleed and still.</span>
+                <span>Order is the cut order. Each photo fills the chosen shape and stays still.</span>
               </div>
             </div>
             <button
@@ -438,6 +454,28 @@ export default function Slideshow({ onHome }) {
                 </li>
               ))}
             </ol>
+          </div>
+
+          <div className="slideshow-section">
+            <div className="slideshow-heading">
+              <div>
+                <h2>Photo cut format</h2>
+                <span>Centered in the 1080×1920 frame. 16:9 and 1:1 keep black bars. The demo is always full screen.</span>
+              </div>
+            </div>
+            <div className="slideshow-formats" role="radiogroup" aria-label="Photo cut format">
+              {formats.map((format) => (
+                <button
+                  aria-pressed={format.id === selectedFormat.id}
+                  className={format.id === selectedFormat.id ? 'is-active' : ''}
+                  key={format.id}
+                  onClick={() => setPhotoFormat(format.id)}
+                  type="button"
+                >
+                  {format.id}
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="slideshow-section">
@@ -647,11 +685,7 @@ export default function Slideshow({ onHome }) {
           <div
             className="slideshow-phone"
             ref={phoneRef}
-            style={{
-              aspectRatio: settings
-                ? `${settings.width} / ${settings.height}`
-                : '16 / 9',
-            }}
+            style={{ aspectRatio: `${outputWidth} / ${outputHeight}` }}
           >
             {showRender && job?.outputUrl ? (
               <video
@@ -660,16 +694,26 @@ export default function Slideshow({ onHome }) {
                 playsInline
                 src={job.outputUrl}
               />
-            ) : previewImage ? (
-              <img alt="" src={previewImage.url} />
             ) : (
-              <div className="slideshow-empty">Drop photos to preview the cut.</div>
+              <div
+                className="slideshow-photo-stage"
+                style={{
+                  height: `${(photoHeight / outputHeight) * 100}%`,
+                  top: `${((outputHeight - photoHeight) / 2 / outputHeight) * 100}%`,
+                }}
+              >
+                {previewImage ? (
+                  <img alt="" src={previewImage.url} />
+                ) : (
+                  <div className="slideshow-empty">Drop photos to preview the cut.</div>
+                )}
+                {text.trim() ? (
+                  <p className="slideshow-caption" ref={captionRef} style={captionStyle}>
+                    {text}
+                  </p>
+                ) : null}
+              </div>
             )}
-            {text.trim() && !(showRender && job?.outputUrl) ? (
-              <p className="slideshow-caption" ref={captionRef} style={captionStyle}>
-                {text}
-              </p>
-            ) : null}
           </div>
           <div className="slideshow-stage-actions">
             <button

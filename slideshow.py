@@ -2,11 +2,14 @@
 """Fast-cut photo slideshows with a static text overlay.
 
 Timing and text layout are measured from the reference TikTok screen
-recording (960x576, 24fps). The default canvas is 1920x1080, the same
-16:9 frame at twice the reference size. Photos cover that frame and are
-center-cropped. The photos are stills: hard cuts, no zoom.
-An optional demo video can play after the last photo. The hook text is
-drawn on the photos only, so it is gone when the demo starts.
+recording (960x576, 24fps). The export is always 1080x1920. Photos are
+center-cropped into a 16:9, 1:1, or 9:16 area and that area is fitted and
+centered on the vertical frame, with black bars when it does not fill it.
+The hook text stays inside the photo area. The photos are stills: hard
+cuts, no zoom.
+An optional demo video plays after the last photo, cover-cropped to the
+full 1080x1920 frame. The hook text is drawn on the photos only, so it is
+gone when the demo starts.
 Each photo holds for 10 frames at 24fps, which is 0.417 seconds. Twenty
 photos end at 8.333 seconds, the hard cut into the TikTok end card.
 The yellow is TikTok's in-app yellow swatch, #F2CD46.
@@ -46,9 +49,17 @@ MAX_IMAGES = 80
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_TEXT_CHARS = 800
 
-# 16:9, twice the 960x576 reference on both axes.
-SLIDESHOW_WIDTH = 1920
-SLIDESHOW_HEIGHT = 1080
+# Every Fast Cut export is a vertical 9:16 frame.
+SLIDESHOW_WIDTH = 1080
+SLIDESHOW_HEIGHT = 1920
+# Photo cuts are composed at one of these sizes, then fitted and centered
+# in the 1080x1920 frame. 16:9 is 1080x608. 1:1 is 1080x1080. 9:16 fills it.
+DEFAULT_PHOTO_FORMAT = "16:9"
+PHOTO_FORMATS: dict[str, tuple[int, int]] = {
+    "16:9": (1080, 608),
+    "1:1": (1080, 1080),
+    "9:16": (1080, 1920),
+}
 
 # Glyph fit against the 960x576 reference frame, using ffmpeg drawtext.
 # Size scales with frame width, so the caption keeps the same share of the
@@ -188,6 +199,42 @@ def cover_crop_filter(width: int, height: int) -> str:
         f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2,"
         "setsar=1"
     )
+
+
+def fit_pad_filter(width: int, height: int) -> str:
+    """Scale to fit, then center on black. Used to place a photo cut in the frame."""
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+        "setsar=1"
+    )
+
+
+def parse_photo_format(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned not in PHOTO_FORMATS:
+        allowed = ", ".join(PHOTO_FORMATS)
+        raise ValueError(f"Photo format must be one of: {allowed}.")
+    return cleaned
+
+
+def photo_format_size(photo_format: str = DEFAULT_PHOTO_FORMAT) -> tuple[int, int]:
+    return PHOTO_FORMATS[parse_photo_format(photo_format)]
+
+
+def photo_content_box(photo_format: str = DEFAULT_PHOTO_FORMAT) -> tuple[int, int, int, int]:
+    """x, y, width, height of the photo area inside the 1080x1920 frame."""
+    width, height = photo_format_size(photo_format)
+    x = (SLIDESHOW_WIDTH - width) // 2
+    y = (SLIDESHOW_HEIGHT - height) // 2
+    return x, y, width, height
+
+
+def photo_format_payload() -> list[dict[str, int | str]]:
+    return [
+        {"id": name, "width": width, "height": height}
+        for name, (width, height) in PHOTO_FORMATS.items()
+    ]
 
 
 def text_draw_position() -> tuple[str, str]:
@@ -384,29 +431,29 @@ def render_slideshow(
     text: str = "",
     image_seconds: float = DEFAULT_IMAGE_SECONDS,
     music_path: Path | None = None,
-    width: int = SLIDESHOW_WIDTH,
-    height: int = SLIDESHOW_HEIGHT,
     fps: int = SLIDESHOW_FPS,
     output_path: Path | None = None,
     progress_callback: ProgressCallback | None = None,
     demo_path: Path | None = None,
     keep_demo_audio: bool = False,
     preset: str = "medium",
+    photo_format: str = DEFAULT_PHOTO_FORMAT,
 ) -> Path:
     """Render a hard-cut slideshow. Video length is images × frame-snapped duration.
 
-    An optional demo plays after the last photo, at the same size and frame
-    rate. Hook text is burned into the photos before that join, so it is gone
-    as soon as the demo starts.
+    Photos are cropped to the chosen shape and centered in a 1080x1920 frame.
+    An optional demo then fills that frame. Hook text is burned into the
+    photo area before the join, so it is gone as soon as the demo starts.
     """
     if not image_paths:
         raise ValueError("Add at least one image.")
     if len(image_paths) > MAX_IMAGES:
         raise ValueError(f"Use {MAX_IMAGES} images or fewer.")
-    if width < 16 or height < 16:
-        raise ValueError("Slideshow size is too small.")
     if not FONT_PATH.is_file():
         raise FileNotFoundError(f"Missing slideshow font: {FONT_PATH}")
+    photo_format = parse_photo_format(photo_format)
+    photo_width, photo_height = photo_format_size(photo_format)
+    width, height = SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT
 
     image_seconds = validate_image_seconds(image_seconds)
     frames = slide_frame_count(image_seconds, fps)
@@ -425,10 +472,14 @@ def render_slideshow(
         if progress_callback is not None:
             progress_callback(message)
 
-    font_size, line_spacing = fitted_text_metrics(overlay, width)
+    font_size, line_spacing = fitted_text_metrics(overlay, photo_width)
     emit(
         f"Photos: {len(image_paths)} × {frames} frames "
         f"({slide_seconds:.3f}s) at {fps}fps"
+    )
+    emit(
+        f"Photo format: {photo_format} ({photo_width}x{photo_height} "
+        f"inside {width}x{height})"
     )
     emit(f"Output length: {duration:.3f}s ({width}x{height})")
     if overlay.strip():
@@ -501,7 +552,7 @@ def render_slideshow(
         filters: list[str] = []
         for index in range(len(normalized)):
             filters.append(
-                f"[{index}:v]{cover_crop_filter(width, height)},"
+                f"[{index}:v]{cover_crop_filter(photo_width, photo_height)},"
                 f"fps={fps},format=yuv420p,"
                 f"trim=end_frame={frames},setpts=PTS-STARTPTS[v{index}]"
             )
@@ -524,18 +575,18 @@ def render_slideshow(
             current = "with_text"
         else:
             current = "base"
-        # Text is already burned into the photos. A demo is appended after
-        # that, so the hook is gone the moment the demo starts.
+        # Text is burned into the photo-sized frame, then that frame is fitted
+        # and centered. A demo is cover-cropped to the full vertical frame
+        # and appended, so the hook is gone the moment the demo starts.
+        placed = (
+            f"[{current}]{fit_pad_filter(width, height)},"
+            f"{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},format=yuv420p"
+        )
         if demo is None:
-            filters.append(
-                f"[{current}]{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},format=yuv420p[vout]"
-            )
+            filters.append(f"{placed}[vout]")
             audio_filters: list[str] = []
         else:
-            filters.append(
-                f"[{current}]{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},"
-                f"format=yuv420p,settb=1/{fps}[photos]"
-            )
+            filters.append(f"{placed},settb=1/{fps}[photos]")
             filters.append(
                 f"[{demo_index}:v]{cover_crop_filter(width, height)},"
                 f"fps={fps},format=yuv420p,{SDR_COLOR_PARAMS},{STRIP_AMBIENT_SIDE_DATA},"
@@ -687,8 +738,7 @@ def render_fast_cuts(
     image_seconds: float = DEFAULT_IMAGE_SECONDS,
     output_path: Path | None = None,
     output_dir: Path | None = None,
-    width: int = SLIDESHOW_WIDTH,
-    height: int = SLIDESHOW_HEIGHT,
+    photo_format: str = DEFAULT_PHOTO_FORMAT,
     preset: str = "medium",
 ) -> list[Path]:
     """Render one photo folder, or every photo folder inside a batch folder.
@@ -722,9 +772,8 @@ def render_fast_cuts(
                 text=hook,
                 image_seconds=image_seconds,
                 music_path=music_path,
-                width=width,
-                height=height,
                 output_path=destination,
+                photo_format=photo_format,
                 demo_path=demo_path,
                 keep_demo_audio=keep_demo_audio,
                 preset=preset,
@@ -775,6 +824,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Seconds per photo before frame snapping (default {DEFAULT_IMAGE_SECONDS}).",
     )
     parser.add_argument(
+        "--format",
+        default=DEFAULT_PHOTO_FORMAT,
+        choices=tuple(PHOTO_FORMATS),
+        help=(
+            "Photo cut shape inside the 1080x1920 frame. "
+            "16:9 and 1:1 are centered with black bars. 9:16 fills the frame. "
+            f"Default {DEFAULT_PHOTO_FORMAT}. The demo is always full frame."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -804,6 +863,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             image_seconds=args.seconds,
             output_path=args.output,
             output_dir=args.output_dir,
+            photo_format=args.format,
         )
     except (ValueError, RuntimeError, OSError) as error:
         print(f"Could not render: {error}", file=sys.stderr)

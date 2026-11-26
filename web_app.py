@@ -48,11 +48,14 @@ from slideshow import (
     REFERENCE_FRAME_WIDTH,
     REFERENCE_LINE_SPACING,
     REFERENCE_LINE_TOP_DELTA,
+    DEFAULT_PHOTO_FORMAT,
     SLIDESHOW_FPS,
     SLIDESHOW_HEIGHT,
     SLIDESHOW_WIDTH,
     TEXT_COLOR_HEX,
     inspect_demo_video,
+    parse_photo_format,
+    photo_format_payload,
     render_slideshow,
     slideshow_plan,
     validate_image_payloads,
@@ -947,6 +950,7 @@ def run_slideshow_job(
     music_path: Path | None,
     demo_path: Path | None = None,
     keep_demo_audio: bool = False,
+    photo_format: str = DEFAULT_PHOTO_FORMAT,
 ) -> None:
     set_job_status(job_id, "running")
     temp_dir = Path(tempfile.mkdtemp(dir=ROOT))
@@ -964,6 +968,7 @@ def run_slideshow_job(
             music_path=music_path,
             demo_path=demo_path,
             keep_demo_audio=keep_demo_audio,
+            photo_format=photo_format,
             progress_callback=lambda message: append_job_log(job_id, message),
         )
         output_url = f"/api/media/output?{urlencode({'output_name': output_path.name})}"
@@ -992,6 +997,8 @@ def slideshow_defaults() -> dict[str, object]:
         "maxImages": MAX_IMAGES,
         "width": SLIDESHOW_WIDTH,
         "height": SLIDESHOW_HEIGHT,
+        "photoFormat": DEFAULT_PHOTO_FORMAT,
+        "photoFormats": photo_format_payload(),
         "textColor": TEXT_COLOR_HEX,
         "referenceWidth": REFERENCE_FRAME_WIDTH,
         "fontSizeAtReference": REFERENCE_FONT_SIZE,
@@ -1051,6 +1058,7 @@ async def start_slideshow_render(
     music_name: str = Form("random"),
     use_demo: bool = Form(False),
     keep_demo_audio: bool = Form(False),
+    photo_format: str = Form(DEFAULT_PHOTO_FORMAT),
     demo: UploadFile | None = File(None),
 ) -> dict[str, object]:
     if not images:
@@ -1064,6 +1072,7 @@ async def start_slideshow_render(
         )
     try:
         checked_duration = validate_image_seconds(image_duration)
+        checked_format = parse_photo_format(photo_format)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1098,6 +1107,7 @@ async def start_slideshow_render(
             music_path,
             demo_path,
             keep_demo_audio and demo_path is not None,
+            checked_format,
         ),
         daemon=True,
     )

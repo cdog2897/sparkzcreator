@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from generate_video import OUTPUT_DIR, ffmpeg_exe, probe_duration
 from slideshow import (
     DEFAULT_IMAGE_SECONDS,
+    DEFAULT_PHOTO_FORMAT,
     REFERENCE_FONT_SIZE,
     REFERENCE_FRAME_HEIGHT,
     REFERENCE_FRAME_WIDTH,
@@ -26,9 +27,13 @@ from slideshow import (
     TEXT_COLOR_HEX,
     cover_crop_filter,
     demo_play_seconds,
+    fit_pad_filter,
     fitted_text_metrics,
     inspect_demo_video,
     main as slideshow_main,
+    parse_photo_format,
+    photo_content_box,
+    photo_format_size,
     quantized_slide_seconds,
     read_hook_text,
     render_fast_cuts,
@@ -109,11 +114,12 @@ class SlideshowTimingTests(unittest.TestCase):
         self.assertEqual(slideshow_text_metrics(1920), (70, -4))
         self.assertEqual(fitted_text_metrics(SAMPLE_TEXT, 960), (35, -2))
         self.assertEqual(fitted_text_metrics(SAMPLE_TEXT, 1920), (70, -4))
-        # Width share stays constant: 70/1920 == 35/960.
+        # Width share stays constant when the width is an integer multiple: 70/1920 == 35/960.
         self.assertEqual(
-            slideshow_text_metrics(SLIDESHOW_WIDTH)[0] / SLIDESHOW_WIDTH,
+            slideshow_text_metrics(1920)[0] / 1920,
             REFERENCE_FONT_SIZE / REFERENCE_FRAME_WIDTH,
         )
+        self.assertEqual(slideshow_text_metrics(SLIDESHOW_WIDTH), (39, -2))
 
     def test_caption_stays_centered_like_the_reference(self) -> None:
         self.assertEqual(REFERENCE_FRAME_WIDTH, 960)
@@ -125,11 +131,24 @@ class SlideshowTimingTests(unittest.TestCase):
         self.assertLess(font_size, 70)
 
     def test_cover_crop_is_full_bleed_and_still(self) -> None:
-        video_filter = cover_crop_filter(SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT)
+        photo_width, photo_height = photo_format_size("16:9")
+        video_filter = cover_crop_filter(photo_width, photo_height)
+        self.assertEqual((photo_width, photo_height), (1080, 608))
         self.assertIn("force_original_aspect_ratio=increase", video_filter)
-        self.assertIn("crop=1920:1080:(iw-1920)/2:(ih-1080)/2", video_filter)
+        self.assertIn("crop=1080:608:(iw-1080)/2:(ih-608)/2", video_filter)
         self.assertNotIn("zoompan", video_filter)
         self.assertNotIn("pad=", video_filter)
+        demo_filter = cover_crop_filter(SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT)
+        self.assertIn("crop=1080:1920:(iw-1080)/2:(ih-1920)/2", demo_filter)
+        placed = fit_pad_filter(SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT)
+        self.assertIn("force_original_aspect_ratio=decrease", placed)
+        self.assertIn("pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black", placed)
+        self.assertEqual(photo_content_box("16:9"), (0, 656, 1080, 608))
+        self.assertEqual(photo_content_box("1:1"), (0, 420, 1080, 1080))
+        self.assertEqual(photo_content_box("9:16"), (0, 0, 1080, 1920))
+        self.assertEqual(DEFAULT_PHOTO_FORMAT, "16:9")
+        with self.assertRaises(ValueError):
+            parse_photo_format("4:3")
 
     def test_text_color_is_the_tiktok_yellow_swatch(self) -> None:
         self.assertEqual(TEXT_COLOR_HEX, "#F2CD46")
@@ -150,19 +169,19 @@ class SlideshowRenderTests(unittest.TestCase):
                 text=SAMPLE_TEXT,
                 image_seconds=0.417,
                 music_path=None,
-                width=320,
-                height=568,
                 output_path=output_path,
+                preset="ultrafast",
             )
 
             self.assertAlmostEqual(probe_duration(output_path), 20 / 24, places=2)
             self.assertEqual(_video_packet_count(output_path), 20)
+            self.assertEqual(_frame_at(output_path, 0).size, (SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT))
 
-    def test_default_canvas_is_16_by_9(self) -> None:
-        self.assertEqual((SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT), (1920, 1080))
-        self.assertEqual(SLIDESHOW_WIDTH / SLIDESHOW_HEIGHT, 16 / 9)
+    def test_default_canvas_is_vertical_9_by_16(self) -> None:
+        self.assertEqual((SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT), (1080, 1920))
+        self.assertEqual(SLIDESHOW_WIDTH / SLIDESHOW_HEIGHT, 9 / 16)
 
-    def test_cover_crop_fills_the_frame_with_no_bars(self) -> None:
+    def test_default_16_by_9_photo_is_letterboxed_and_full_bleed_inside(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             temp_dir = Path(temp_name)
             portrait = temp_dir / "portrait.png"
@@ -175,18 +194,15 @@ class SlideshowRenderTests(unittest.TestCase):
                 text=SAMPLE_TEXT,
                 image_seconds=0.417,
                 music_path=None,
-                width=320,
-                height=180,
                 output_path=output_path,
+                preset="ultrafast",
             )
             first = _frame_at(output_path, 0)
             second = _frame_at(output_path, 0.5)
-            self.assertEqual(first.size, (320, 180))
-            self.assertEqual(second.size, (320, 180))
-            self.assertTrue(_is_red(first.getpixel((4, 4))))
-            self.assertTrue(_is_red(first.getpixel((316, 176))))
-            self.assertTrue(_is_blue(second.getpixel((4, 4))))
-            self.assertTrue(_is_blue(second.getpixel((316, 176))))
+            self.assertEqual(first.size, (1080, 1920))
+            self.assertEqual(second.size, (1080, 1920))
+            _assert_photo_bars(self, first, "16:9", _is_red)
+            _assert_photo_bars(self, second, "16:9", _is_blue)
             self.assertTrue(_has_yellow(first))
             self.assertTrue(_has_yellow(second))
 
@@ -226,6 +242,21 @@ def _is_red(pixel: tuple[int, int, int]) -> bool:
 def _is_blue(pixel: tuple[int, int, int]) -> bool:
     red, green, blue = pixel
     return blue > 140 and red < 80 and green < 120
+
+
+def _is_black(pixel: tuple[int, int, int]) -> bool:
+    return max(pixel) < 30
+
+
+def _assert_photo_bars(test: unittest.TestCase, frame: Image.Image, photo_format: str, color_check) -> None:
+    x, y, width, height = photo_content_box(photo_format)
+    if y > 0:
+        test.assertTrue(_is_black(frame.getpixel((8, 4))))
+        test.assertTrue(_is_black(frame.getpixel((width - 8, frame.height - 5))))
+    else:
+        test.assertFalse(_is_black(frame.getpixel((8, 4))))
+    test.assertTrue(color_check(frame.getpixel((x + 8, y + 12))))
+    test.assertTrue(color_check(frame.getpixel((x + width - 8, y + height - 12))))
 
 
 def _has_yellow(frame: Image.Image) -> bool:
@@ -272,8 +303,13 @@ class SlideshowEndpointTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["defaultImageDuration"], 0.417)
         self.assertEqual(payload["fps"], 24)
-        self.assertEqual(payload["width"], 1920)
-        self.assertEqual(payload["height"], 1080)
+        self.assertEqual(payload["width"], 1080)
+        self.assertEqual(payload["height"], 1920)
+        self.assertEqual(payload["photoFormat"], "16:9")
+        self.assertEqual(
+            [(item["id"], item["width"], item["height"]) for item in payload["photoFormats"]],
+            [("16:9", 1080, 608), ("1:1", 1080, 1080), ("9:16", 1080, 1920)],
+        )
         self.assertEqual(payload["textColor"], "#F2CD46")
         self.assertEqual(payload["fontSizeAtReference"], 35)
         self.assertEqual(payload["referenceWidth"], 960)
@@ -492,13 +528,11 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 text=SAMPLE_TEXT,
                 image_seconds=0.417,
                 music_path=None,
-                width=320,
-                height=180,
                 output_path=output,
                 preset="ultrafast",
             )
             self.assertAlmostEqual(probe_duration(output), 20 / 24, places=2)
-            self.assertEqual(_frame_at(output, 0).size, (320, 180))
+            self.assertEqual(_frame_at(output, 0).size, (1080, 1920))
             self.assertFalse(_has_audio_stream(output))
             self.assertTrue(_has_yellow(_frame_at(output, 0)))
 
@@ -515,8 +549,6 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 music_path=None,
                 demo_path=demo,
                 keep_demo_audio=False,
-                width=320,
-                height=180,
                 output_path=output,
                 preset="ultrafast",
             )
@@ -526,15 +558,15 @@ class SlideshowDemoRenderTests(unittest.TestCase):
             self.assertAlmostEqual(expected, 32 / 24)
             opening = _frame_at(output, 0)
             during_demo = _frame_at(output, (20 / 24) + 0.08)
-            self.assertEqual(opening.size, (320, 180))
-            self.assertEqual(during_demo.size, (320, 180))
+            self.assertEqual(opening.size, (1080, 1920))
+            self.assertEqual(during_demo.size, (1080, 1920))
             self.assertTrue(_has_yellow(opening))
             self.assertFalse(_has_yellow(during_demo))
-            self.assertTrue(_is_green(during_demo.getpixel((2, 2))))
-            self.assertTrue(_is_green(during_demo.getpixel((318, 178))))
+            self.assertTrue(_is_green(during_demo.getpixel((8, 8))))
+            self.assertTrue(_is_green(during_demo.getpixel((1072, 1912))))
             self.assertFalse(_has_audio_stream(output))
 
-    def test_full_canvas_stays_1920x1080(self) -> None:
+    def test_full_canvas_stays_1080x1920(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             folder = Path(temp_name)
             demo = folder / "demo.mp4"
@@ -546,14 +578,11 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 text=SAMPLE_TEXT,
                 image_seconds=0.417,
                 demo_path=demo,
-                width=SLIDESHOW_WIDTH,
-                height=SLIDESHOW_HEIGHT,
                 output_path=output,
                 preset="ultrafast",
             )
             frame = _frame_at(output, 0)
-            self.assertEqual(frame.size, (SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT))
-            self.assertEqual((SLIDESHOW_WIDTH, SLIDESHOW_HEIGHT), (1920, 1080))
+            self.assertEqual(frame.size, (1080, 1920))
             info = inspect_demo_video(demo)
             self.assertAlmostEqual(
                 probe_duration(output),
@@ -574,8 +603,6 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 image_seconds=0.417,
                 music_path=None,
                 demo_path=demo,
-                width=160,
-                height=90,
                 preset="ultrafast",
             )
             render_slideshow(photos, output_path=silent, keep_demo_audio=False, **shared)
@@ -602,8 +629,6 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 music_path=music,
                 demo_path=demo,
                 keep_demo_audio=True,
-                width=160,
-                height=90,
                 output_path=output,
                 preset="ultrafast",
             )
@@ -630,8 +655,6 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 music_path=music,
                 demo_path=demo,
                 keep_demo_audio=True,
-                width=160,
-                height=90,
                 output_path=output,
                 preset="ultrafast",
             )
@@ -665,8 +688,6 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 demo_path=demo,
                 keep_demo_audio=False,
                 output_dir=root / "out",
-                width=320,
-                height=180,
                 preset="ultrafast",
             )
             self.assertEqual(
@@ -684,7 +705,7 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                 slideshow_duration_seconds(3, 0.417) + info.play_seconds,
                 places=2,
             )
-            self.assertEqual(_frame_at(results[0], 0).size, (320, 180))
+            self.assertEqual(_frame_at(results[0], 0).size, (1080, 1920))
             self.assertFalse(_has_audio_stream(results[0]))
             self.assertTrue(_has_yellow(_frame_at(results[0], 0)))
             self.assertFalse(_has_yellow(_frame_at(results[0], (20 / 24) + 0.08)))
@@ -695,9 +716,11 @@ class SlideshowDemoRenderTests(unittest.TestCase):
                         str(one),
                         "--text",
                         "from the flag",
-                        "--demo",
-                        str(demo),
-                        "--keep-demo-audio",
+                "--demo",
+                str(demo),
+                "--format",
+                "1:1",
+                "--keep-demo-audio",
                         "--music",
                         str(root / "song.wav"),
                         "--output",
@@ -708,9 +731,60 @@ class SlideshowDemoRenderTests(unittest.TestCase):
             self.assertEqual(rendered.call_args.args[0], one)
             self.assertEqual(rendered.call_args.kwargs["demo_path"], demo)
             self.assertTrue(rendered.call_args.kwargs["keep_demo_audio"])
+            self.assertEqual(rendered.call_args.kwargs["photo_format"], "1:1")
             self.assertEqual(rendered.call_args.kwargs["text"], "from the flag")
             self.assertEqual(slideshow_main([str(one), "--demo", str(root / "missing.mp4")]), 1)
             self.assertEqual(slideshow_main([str(one), "--keep-demo-audio"]), 1)
+
+
+class SlideshowPhotoFormatTests(unittest.TestCase):
+    def test_each_format_is_1080x1920_with_and_without_a_demo(self) -> None:
+        formats = ("16:9", "1:1", "9:16")
+        with tempfile.TemporaryDirectory() as temp_name:
+            folder = Path(temp_name)
+            photo = folder / "photo.png"
+            Image.new("RGB", (80, 120), (220, 30, 40)).save(photo)
+            demo = folder / "demo.mp4"
+            _write_demo(demo, seconds=0.25, audio=False)
+            demo_info = inspect_demo_video(demo)
+            for photo_format in formats:
+                plain = folder / f"plain-{photo_format.replace(':', 'x')}.mp4"
+                with_demo = folder / f"demo-{photo_format.replace(':', 'x')}.mp4"
+                render_slideshow(
+                    [photo],
+                    text=SAMPLE_TEXT,
+                    image_seconds=0.417,
+                    music_path=None,
+                    output_path=plain,
+                    preset="ultrafast",
+                    photo_format=photo_format,
+                )
+                render_slideshow(
+                    [photo],
+                    text=SAMPLE_TEXT,
+                    image_seconds=0.417,
+                    music_path=None,
+                    demo_path=demo,
+                    output_path=with_demo,
+                    preset="ultrafast",
+                    photo_format=photo_format,
+                )
+                opening = _frame_at(plain, 0)
+                self.assertEqual(opening.size, (1080, 1920))
+                self.assertEqual(_frame_at(with_demo, 0).size, (1080, 1920))
+                _assert_photo_bars(self, opening, photo_format, _is_red)
+                self.assertTrue(_has_yellow(opening))
+                during_demo = _frame_at(with_demo, (10 / 24) + 0.04)
+                self.assertEqual(during_demo.size, (1080, 1920))
+                self.assertTrue(_is_green(during_demo.getpixel((8, 8))))
+                self.assertTrue(_is_green(during_demo.getpixel((1072, 1912))))
+                self.assertFalse(_is_black(during_demo.getpixel((8, 4))))
+                self.assertFalse(_has_yellow(during_demo))
+                self.assertAlmostEqual(
+                    probe_duration(with_demo),
+                    slideshow_duration_seconds(1, 0.417) + demo_info.play_seconds,
+                    places=2,
+                )
 
 
 class SlideshowDemoEndpointTests(unittest.TestCase):
@@ -772,10 +846,14 @@ class SlideshowDemoEndpointTests(unittest.TestCase):
             self.assertEqual(uploaded.status_code, 200, uploaded.text)
 
             output_path = OUTPUT_DIR / "slideshow_demo_endpoint.mp4"
-            calls: list[tuple[object, bool]] = []
+            calls: list[tuple[object, bool, object]] = []
 
             def fake_render(image_paths, text="", image_seconds=0.417, music_path=None, progress_callback=None, **kwargs):
-                calls.append((kwargs.get("demo_path"), kwargs.get("keep_demo_audio")))
+                calls.append((
+                    kwargs.get("demo_path"),
+                    kwargs.get("keep_demo_audio"),
+                    kwargs.get("photo_format"),
+                ))
                 if progress_callback is not None:
                     progress_callback("Rendering test.")
                 output_path.parent.mkdir(exist_ok=True)
@@ -802,10 +880,11 @@ class SlideshowDemoEndpointTests(unittest.TestCase):
                     job = self._wait_for_job(body["job"]["id"])
                 self.assertEqual(job["status"], "complete", job.get("error"))
                 self.assertEqual(len(calls), 1)
-                demo_path, keep_audio = calls[0]
+                demo_path, keep_audio, used_format = calls[0]
                 self.assertIsNotNone(demo_path)
                 self.assertTrue(Path(demo_path).is_file())
                 self.assertTrue(keep_audio)
+                self.assertEqual(used_format, "16:9")
             finally:
                 output_path.unlink(missing_ok=True)
 
@@ -816,6 +895,16 @@ class SlideshowDemoEndpointTests(unittest.TestCase):
                 files=[("images", ("a.png", png_bytes((10, 10, 10)), "image/png"))],
             )
             self.assertEqual(refused.status_code, 400)
+            rejected_format = self.client.post(
+                "/api/slideshow/render",
+                data={
+                    "image_duration": "0.417",
+                    "music_name": "none",
+                    "photo_format": "4:3",
+                },
+                files=[("images", ("a.png", png_bytes((10, 10, 10)), "image/png"))],
+            )
+            self.assertEqual(rejected_format.status_code, 400)
 
     def _wait_for_job(self, job_id: str) -> dict:
         import time
