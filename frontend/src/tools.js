@@ -19,7 +19,7 @@ export const tools = [
   {
     id: 'fast-cut-slideshow',
     name: 'Fast Cut Slideshow',
-    description: 'Hard-cut through photos with centered yellow text and music, then download an MP4.',
+    description: 'Hard-cut through photos on a 1080×1920 frame, in 16:9, square, or full frame, then an optional full-screen end demo.',
     icon: Images,
     route: '/tools/slideshow',
     component: Slideshow,
